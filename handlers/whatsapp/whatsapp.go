@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	configNamespace = "fb_namespace"
+	configNamespace  = "fb_namespace"
+	configHSMSupport = "hsm_support"
 )
 
 var (
@@ -326,6 +327,30 @@ type LocalizableParam struct {
 	Default string `json:"default"`
 }
 
+type Param struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type Component struct {
+	Type       string  `json:"type"`
+	Parameters []Param `json:"parameters"`
+}
+
+type templatePayload struct {
+	To       string `json:"to"`
+	Type     string `json:"type"`
+	Template struct {
+		Namespace string `json:"namespace"`
+		Name      string `json:"name"`
+		Language  struct {
+			Policy string `json:"policy"`
+			Code   string `json:"code"`
+		} `json:"language"`
+		Components []Component `json:"components"`
+	} `json:"template"`
+}
+
 type hsmPayload struct {
 	To   string `json:"to"`
 	Type string `json:"type"`
@@ -392,6 +417,8 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	sendPath, _ := url.Parse("/v1/messages")
 
 	status := h.Backend().NewMsgStatusForID(msg.Channel(), msg.ID(), courier.MsgErrored)
+
+	var wppID string
 	var logs []*courier.ChannelLog
 
 	if len(msg.Attachments()) > 0 {
@@ -406,7 +433,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 					Type: "audio",
 				}
 				payload.Audio = &mediaObject{Link: s3url}
-				externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
 
 			} else if strings.HasPrefix(mimeType, "application") {
 				payload := mtDocumentPayload{
@@ -419,7 +446,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 				} else {
 					payload.Document = &mediaObject{Link: s3url}
 				}
-				externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
 
 			} else if strings.HasPrefix(mimeType, "image") {
 				payload := mtImagePayload{
@@ -431,7 +458,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 				} else {
 					payload.Image = &mediaObject{Link: s3url}
 				}
-				externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
 			} else if strings.HasPrefix(mimeType, "video") {
 				payload := mtVideoPayload{
 					To:   msg.URN().Path(),
@@ -442,7 +469,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 				} else {
 					payload.Video = &mediaObject{Link: s3url}
 				}
-				externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
 			} else {
 				duration := time.Since(start)
 				err = fmt.Errorf("unknown attachment mime type: %s", mimeType)
@@ -479,20 +506,40 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 				return nil, errors.Errorf("cannot send template message without Facebook namespace for channel: %s", msg.Channel().UUID())
 			}
 
-			payload := &hsmPayload{
-				To:   msg.URN().Path(),
-				Type: "hsm",
-			}
-			payload.HSM.Namespace = namespace
-			payload.HSM.ElementName = templating.Template.Name
-			payload.HSM.Language.Policy = "deterministic"
-			payload.HSM.Language.Code = templating.Language
-			for _, v := range templating.Variables {
-				payload.HSM.LocalizableParams = append(payload.HSM.LocalizableParams, LocalizableParam{Default: v})
-			}
-
 			externalID := ""
-			externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+			if msg.Channel().BoolConfigForKey(configHSMSupport, false) {
+				payload := hsmPayload{
+					To:   msg.URN().Path(),
+					Type: "hsm",
+				}
+				payload.HSM.Namespace = namespace
+				payload.HSM.ElementName = templating.Template.Name
+				payload.HSM.Language.Policy = "deterministic"
+				payload.HSM.Language.Code = templating.Language
+				for _, v := range templating.Variables {
+					payload.HSM.LocalizableParams = append(payload.HSM.LocalizableParams, LocalizableParam{Default: v})
+				}
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+			} else {
+
+				payload := templatePayload{
+					To:   msg.URN().Path(),
+					Type: "template",
+				}
+				payload.Template.Namespace = namespace
+				payload.Template.Name = templating.Template.Name
+				payload.Template.Language.Policy = "deterministic"
+				payload.Template.Language.Code = templating.Language
+
+				component := &Component{Type: "body"}
+
+				for _, v := range templating.Variables {
+					component.Parameters = append(component.Parameters, Param{Type: "text", Text: v})
+				}
+				payload.Template.Components = append(payload.Template.Components, *component)
+
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+			}
 
 			// add logs to our status
 			for _, log := range logs {
@@ -503,7 +550,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 				status.SetExternalID(externalID)
 			}
 		} else {
-			parts := handlers.SplitMsg(msg.Text(), maxMsgLength)
+			parts := handlers.SplitMsgByChannel(msg.Channel(), msg.Text(), maxMsgLength)
 			externalID := ""
 			for i, part := range parts {
 				payload := mtTextPayload{
@@ -511,7 +558,7 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 					Type: "text",
 				}
 				payload.Text.Body = part
-				externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
+				wppID, externalID, logs, err = sendWhatsAppMsg(msg, sendPath, token, payload)
 
 				// add logs to our status
 				for _, log := range logs {
@@ -531,20 +578,30 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 
 	// we are wired it there were no errors
 	if err == nil {
+		if wppID != "" {
+			newURN, _ := urns.NewWhatsAppURN(wppID)
+			err = status.SetUpdatedURN(msg.URN(), newURN)
+
+			if err != nil {
+				elapsed := time.Now().Sub(start)
+				log := courier.NewChannelLogFromError("unable to update contact URN", msg.Channel(), msg.ID(), elapsed, err)
+				status.AddLog(log)
+			}
+		}
 		status.SetStatus(courier.MsgWired)
 	}
 
 	return status, nil
 }
 
-func sendWhatsAppMsg(msg courier.Msg, sendPath *url.URL, token string, payload interface{}) (string, []*courier.ChannelLog, error) {
+func sendWhatsAppMsg(msg courier.Msg, sendPath *url.URL, token string, payload interface{}) (string, string, []*courier.ChannelLog, error) {
 	start := time.Now()
 	jsonBody, err := json.Marshal(payload)
 
 	if err != nil {
 		elapsed := time.Now().Sub(start)
 		log := courier.NewChannelLogFromError("unable to build JSON body", msg.Channel(), msg.ID(), elapsed, err)
-		return "", []*courier.ChannelLog{log}, err
+		return "", "", []*courier.ChannelLog{log}, err
 	}
 	req, _ := http.NewRequest(http.MethodPost, sendPath.String(), bytes.NewReader(jsonBody))
 	req.Header = buildWhatsAppRequestHeader(token)
@@ -557,7 +614,7 @@ func sendWhatsAppMsg(msg courier.Msg, sendPath *url.URL, token string, payload i
 	if err == nil && len(errPayload.Errors) > 0 {
 		if !hasWhatsAppContactError(*errPayload) {
 			err := errors.Errorf("received error from send endpoint: %s", errPayload.Errors[0].Title)
-			return "", []*courier.ChannelLog{log}, err
+			return "", "", []*courier.ChannelLog{log}, err
 		}
 		// check contact
 		baseURL := fmt.Sprintf("%s://%s", sendPath.Scheme, sendPath.Host)
@@ -566,12 +623,54 @@ func sendWhatsAppMsg(msg courier.Msg, sendPath *url.URL, token string, payload i
 		if rrCheck == nil {
 			elapsed := time.Now().Sub(start)
 			checkLog := courier.NewChannelLogFromError("unable to build contact check request", msg.Channel(), msg.ID(), elapsed, err)
-			return "", []*courier.ChannelLog{log, checkLog}, err
+			return "", "", []*courier.ChannelLog{log, checkLog}, err
 		}
 		checkLog := courier.NewChannelLogFromRR("Contact check", msg.Channel(), msg.ID(), rrCheck).WithError("Status Error", err)
 
 		if err != nil {
-			return "", []*courier.ChannelLog{log, checkLog}, err
+			return "", "", []*courier.ChannelLog{log, checkLog}, err
+		}
+		// update contact URN and msg destiny with returned wpp id
+		wppID, err := jsonparser.GetString(rrCheck.Body, "contacts", "[0]", "wa_id")
+
+		if err == nil {
+			var updatedPayload interface{}
+
+			// handle msg type casting
+			switch v := payload.(type) {
+			case mtTextPayload:
+				v.To = wppID
+				updatedPayload = v
+			case mtImagePayload:
+				v.To = wppID
+				updatedPayload = v
+			case mtVideoPayload:
+				v.To = wppID
+				updatedPayload = v
+			case mtAudioPayload:
+				v.To = wppID
+				updatedPayload = v
+			case mtDocumentPayload:
+				v.To = wppID
+				updatedPayload = v
+			case templatePayload:
+				v.To = wppID
+				updatedPayload = v
+			case hsmPayload:
+				v.To = wppID
+				updatedPayload = v
+			}
+			// marshal updated payload
+			if updatedPayload != nil {
+				payload = updatedPayload
+				jsonBody, err = json.Marshal(payload)
+
+				if err != nil {
+					elapsed := time.Now().Sub(start)
+					log := courier.NewChannelLogFromError("unable to build JSON body", msg.Channel(), msg.ID(), elapsed, err)
+					return "", "", []*courier.ChannelLog{log, checkLog}, err
+				}
+			}
 		}
 		// try send msg again
 		reqRetry, _ := http.NewRequest(http.MethodPost, sendPath.String(), bytes.NewReader(jsonBody))
@@ -581,16 +680,16 @@ func sendWhatsAppMsg(msg courier.Msg, sendPath *url.URL, token string, payload i
 			reqRetry.URL.RawQuery = fmt.Sprintf("%s=1", retryParam)
 		}
 		rrRetry, err := utils.MakeHTTPRequest(reqRetry)
-		retryLog := courier.NewChannelLogFromRR("Message Sent", msg.Channel(), msg.ID(), rr).WithError("Message Send Error", err)
+		retryLog := courier.NewChannelLogFromRR("Message Sent", msg.Channel(), msg.ID(), rrRetry).WithError("Message Send Error", err)
 
 		if err != nil {
-			return "", []*courier.ChannelLog{log, checkLog, retryLog}, err
+			return "", "", []*courier.ChannelLog{log, checkLog, retryLog}, err
 		}
 		externalID, err := getSendWhatsAppMsgId(rrRetry)
-		return externalID, []*courier.ChannelLog{log, checkLog, retryLog}, err
+		return wppID, externalID, []*courier.ChannelLog{log, checkLog, retryLog}, err
 	}
 	externalID, err := getSendWhatsAppMsgId(rr)
-	return externalID, []*courier.ChannelLog{log}, err
+	return "", externalID, []*courier.ChannelLog{log}, err
 }
 
 func buildWhatsAppRequestHeader(token string) http.Header {
@@ -677,8 +776,12 @@ func (h *handler) getTemplate(msg courier.Msg) (*MsgTemplating, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid templating definition")
 	}
+	// check country
+	if templating.Country != "" {
+		templating.Language = fmt.Sprintf("%s_%s", templating.Language, templating.Country)
+	}
 
-	// map our language from iso639-3 to the WA country / iso638-2 pair
+	// map our language from iso639-3_iso3166-2 to the WA country / iso638-2 pair
 	language, found := languageMap[templating.Language]
 	if !found {
 		return nil, fmt.Errorf("unable to find mapping for language: %s", templating.Language)
@@ -698,74 +801,80 @@ type MsgTemplating struct {
 		UUID string `json:"uuid" validate:"required"`
 	} `json:"template" validate:"required,dive"`
 	Language  string   `json:"language" validate:"required"`
+	Country   string   `json:"country"`
 	Variables []string `json:"variables"`
 }
 
-// mapping from iso639-3 to WA language code
+// mapping from iso639-3_iso3166-2 to WA language code
 var languageMap = map[string]string{
-	"afr": "af",    // Afrikaans
-	"sqi": "sq",    // Albanian
-	"ara": "ar",    // Arabic
-	"aze": "az",    // Azerbaijani
-	"ben": "bn",    // Bengali
-	"bul": "bg",    // Bulgarian
-	"cat": "ca",    // Catalan
-	"zho": "zh_CN", // Chinese (CHN)
-	// zh_HK Chinese (HKG) (unsupported, use zh_CN)
-	// zh_TW Chinese (TAI) (unsupported, use zh_CN)
-	"hrv": "hr", //Croatian
-	"ces": "cs", // Czech
-	"dah": "da", // Danish
-	"nld": "nl", // Dutch
-	"eng": "en", // English
-	// en_GB English (UK) (unsupported, use en)
-	// en_US English (US) (unsupported, use en)
-	"est": "et",  // Estonian
-	"fil": "fil", // Filipino
-	"fin": "fi",  // Finnish
-	"fra": "fr",  // French
-	"deu": "de",  // German
-	"ell": "el",  // Greek
-	"gul": "gu",  // Gujarati
-	"enb": "he",  // Hebrew
-	"hin": "hi",  // Hindi
-	"hun": "hu",  // Hungarian
-	"ind": "id",  // Indonesian
-	"gle": "ga",  // Irish
-	"ita": "it",  // Italian
-	"jpn": "ja",  // Japanese
-	"kan": "kn",  // Kannada
-	"kaz": "kk",  // Kazakh
-	"kor": "ko",  // Korean
-	"lao": "lo",  // Lao
-	"jav": "lv",  // Latvian
-	"lit": "lt",  // Lithuanian
-	"mkd": "mk",  // Macedonian
-	"msa": "ms",  // Malay
-	"mar": "mr",  // Marathi
-	"nob": "nb",  // Norwegian
-	"fas": "fa",  // Persian
-	"pol": "pl",  // Polish
-	// "pt_BR" Portuguese (BR)  (unsupported, use pt_PT)
-	"por": "pt_PT", // Portuguese (POR)
-	"pan": "pa",    // Punjabi
-	"ron": "ro",    // Romanian
-	"rus": "ru",    // Russian
-	"srp": "sr",    // Serbian
-	"slk": "sk",    // Slovak
-	"slv": "sl",    // Slovenian
-	"spa": "es",    // Spanish
-	// es_AR Spanish (ARG) (unsupported, use es)
-	// es_ES Spanish (SPA) (unsupported, use es)
-	// es_MX Spanish (MEX) (unsupported, use es)
-	"swa": "sw", // Swahili
-	"swe": "sv", // Swedish
-	"tam": "ta", // Tamil
-	"tel": "te", // Telugu
-	"tha": "th", // Thai
-	"tur": "tr", // Turkish
-	"ukr": "uk", // Ukrainian
-	"urd": "ur", // Urdu
-	"uzb": "uz", // Uzbek
-	"vie": "vi", // Vietnamese
+	"afr": "af",       // Afrikaans
+	"sqi": "sq",       // Albanian
+	"ara": "ar",       // Arabic
+	"aze": "az",       // Azerbaijani
+	"ben": "bn",       // Bengali
+	"bul": "bg",       // Bulgarian
+	"cat": "ca",       // Catalan
+	"zho": "zh_CN",    // Chinese
+	"zho_CN": "zh_CN", // Chinese (CHN)
+	"zho_HK": "zh_HK", // Chinese (HKG)
+	"zho_TW": "zh_TW", // Chinese (TAI)
+	"hrv": "hr",       // Croatian
+	"ces": "cs",       // Czech
+	"dah": "da",       // Danish
+	"nld": "nl",       // Dutch
+	"eng": "en",       // English
+	"eng_GB": "en_GB", // English (UK)
+	"eng_US": "en_US", // English (US)
+	"est": "et",       // Estonian
+	"fil": "fil",      // Filipino
+	"fin": "fi",       // Finnish
+	"fra": "fr",       // French
+	"deu": "de",       // German
+	"ell": "el",       // Greek
+	"gul": "gu",       // Gujarati
+	"hau": "ha",       // Hausa
+	"enb": "he",       // Hebrew
+	"hin": "hi",       // Hindi
+	"hun": "hu",       // Hungarian
+	"ind": "id",       // Indonesian
+	"gle": "ga",       // Irish
+	"ita": "it",       // Italian
+	"jpn": "ja",       // Japanese
+	"kan": "kn",       // Kannada
+	"kaz": "kk",       // Kazakh
+	"kor": "ko",       // Korean
+	"lao": "lo",       // Lao
+	"lav": "lv",       // Latvian
+	"lit": "lt",       // Lithuanian
+	"mal": "ml",       // Malayalam
+	"mkd": "mk",       // Macedonian
+	"msa": "ms",       // Malay
+	"mar": "mr",       // Marathi
+	"nob": "nb",       // Norwegian
+	"fas": "fa",       // Persian
+	"pol": "pl",       // Polish
+	"por": "pt_PT",    // Portuguese
+	"por_BR": "pt_BR", // Portuguese (BR)
+	"por_PT": "pt_PT", // Portuguese (POR)
+	"pan": "pa",       // Punjabi
+	"ron": "ro",       // Romanian
+	"rus": "ru",       // Russian
+	"srp": "sr",       // Serbian
+	"slk": "sk",       // Slovak
+	"slv": "sl",       // Slovenian
+	"spa": "es",       // Spanish
+	"spa_AR": "es_AR", // Spanish (ARG)
+	"spa_ES": "es_ES", // Spanish (SPA)
+	"spa_MX": "es_MX", // Spanish (MEX)
+	"swa": "sw",       // Swahili
+	"swe": "sv",       // Swedish
+	"tam": "ta",       // Tamil
+	"tel": "te",       // Telugu
+	"tha": "th",       // Thai
+	"tur": "tr",       // Turkish
+	"ukr": "uk",       // Ukrainian
+	"urd": "ur",       // Urdu
+	"uzb": "uz",       // Uzbek
+	"vie": "vi",       // Vietnamese
+	"zul": "zu",       // Zulu
 }
