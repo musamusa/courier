@@ -37,6 +37,7 @@ import (
 	_ "github.com/nyaruka/courier/handlers/jasmin"
 	_ "github.com/nyaruka/courier/handlers/jiochat"
 	_ "github.com/nyaruka/courier/handlers/junebug"
+	_ "github.com/nyaruka/courier/handlers/kaleyra"
 	_ "github.com/nyaruka/courier/handlers/kannel"
 	_ "github.com/nyaruka/courier/handlers/line"
 	_ "github.com/nyaruka/courier/handlers/m3tech"
@@ -65,6 +66,7 @@ import (
 	_ "github.com/nyaruka/courier/handlers/whatsapp"
 	_ "github.com/nyaruka/courier/handlers/yo"
 	_ "github.com/nyaruka/courier/handlers/zenvia"
+	_ "github.com/nyaruka/courier/handlers/zenviaold"
 
 	// load available backends
 	_ "github.com/nyaruka/courier/backends/rapidpro"
