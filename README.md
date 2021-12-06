@@ -1,4 +1,4 @@
-# Courier 
+# Courier
 
 [![Build Status](https://github.com/nyaruka/courier/workflows/CI/badge.svg)](https://github.com/nyaruka/courier/actions?query=workflow%3ACI) 
 [![codecov](https://codecov.io/gh/nyaruka/courier/branch/main/graph/badge.svg)](https://codecov.io/gh/nyaruka/courier)
@@ -9,7 +9,7 @@
 Courier is a messaging gateway for text-based messaging channels. It abstracts out various different
 texting mediums and providers, allowing applications to focus on the creation and processing of those messages.
 
-Current courier supports over 36 different channel types, ranging for SMS aggregators like Twilio to
+Current courier supports over 50 different channel types, ranging for SMS aggregators like Twilio to
 IP channels like Facebook and Telegram messenger. The goal is for Courier to support every popular
 messaging channels and aggregator and we are happy to accept pull requests to help accomplish that.
 

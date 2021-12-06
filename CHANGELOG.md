@@ -1,3 +1,85 @@
+v7.1.5
+----------
+ * Add Msg.failed_reason and set when msg fails due to reaching error limit
+
+v7.1.4
+----------
+ * Remove loop detection now that mailroom does this
+ * Smarter organization of quick replies for viber keyboards
+
+v7.1.3
+----------
+ * Use response_to_external_id instead of response_to_id
+
+v7.1.2
+----------
+ * External channel handler should use headers config setting if provided
+
+v7.1.1
+----------
+ * Pin to go 1.17.2
+
+v7.1.0
+----------
+ * Remove chatbase support
+ * Test with Redis 3.2.4
+ * Add support for 'Expired' status in the AT handler
+
+v7.0.0
+----------
+ * Tweak README
+
+v6.5.9
+----------
+ * Fix Viber attachments
+ * CI testing on PG12 and 13
+ * Update to latest gocommon and go 1.17
+
+v6.5.8
+----------
+ * Fix Facebook document attachment
+ * Update to latest gocommon and phonenumbers
+
+v6.5.7
+----------
+ * Fix to only set the quick replies keyboard for the last message
+ * Update to latest gocommon
+
+v6.5.6
+----------
+ * Fix FB signing checks by trimming prefix instead of stripping
+ * Improve layout of Telegram keyboards
+
+v6.5.5
+----------
+ * Send WhatsApp buttons and list buttons when supported (thanks Weni)
+
+v6.5.4
+----------
+ * trim prefix instead of strip when comparing FB sigs
+
+v6.5.3
+----------
+ * log body when calculating signatures, include expected and calculated
+
+v6.5.2
+----------
+ * Add ticket_count column to contact and set to zero when creating new contacts
+
+v6.5.1
+----------
+ * Give S3 storage test new context on startup
+ * Make DBMsg.SentOn nullable
+
+v6.5.0
+----------
+ * Always set sent_on for W/S/D statuses if not already set
+ * Update to latest gocommon
+
+v6.4.0
+----------
+ * 6.4.0 Release Candidate
+
 v6.3.5
 ----------
  * up max request size to 1M
