@@ -1,3 +1,278 @@
+v7.5.29
+----------
+ * Simplify constructing responses and add tests
+ * Make it easier to override responses per handler
+
+v7.5.28
+----------
+ * Update to use SHA256 signature for FBA payload, increase max body bytes limit to 1MiB
+ * Meta channels webhooks requests, should always return 200 status
+
+v7.5.27
+----------
+ * Fix server logging when channel is nil
+
+v7.5.26
+----------
+ * Fix junebug redaction values
+ * Fix redaction on sends and add redaction of error messages
+
+v7.5.25
+----------
+ * Adjust logging for WAC missing channel
+ * Update to latest gocommon
+ * Implement redaction of channel logs
+
+v7.5.24
+----------
+ * Adjust to use the cache by address correctly
+ * Rework handler tests to assert more state by default
+ * Remove duplicate status writes
+ * Append channel log UUIDs on status writes
+ * Set log UUID on incoming messages and channel events
+ * Use go 1.19
+ * Fix some linter warnings
+
+v7.5.23
+----------
+ * Support channels receiving embedded attachments and use with thinq handler
+
+v7.5.22
+----------
+ * Save channel logs with UUID
+
+v7.5.21
+----------
+ * Add codecov token to ci.yml
+ * Add WAC support for sending captioned attachments
+ * Cleanup tests
+ * Include requests made by DescribeURN methods in the channel log for a receive
+
+v7.5.20
+----------
+ * Fix writing errors to channel logs
+
+v7.5.19
+----------
+ * Update to last gocommon
+ * Fix local timezone dependent test
+ * Don't fail CI for codecov problems
+ * Add UUID to channel logs
+ * Replace remaining usages of MakeHTTPRequest
+
+v7.5.18
+----------
+ * Fix insert channel log SQL
+
+v7.5.17
+----------
+ * Fix writing channel logs
+
+v7.5.16
+----------
+ * Write channel logs in new format
+
+v7.5.15
+----------
+ * Use logger for handler func calls
+
+v7.5.14
+----------
+ * Update to latest gocommon and use new recorder reconstruct option
+
+v7.5.13
+----------
+ * Use httpx.Recorder to generate traces of incoming requests
+ * Rework WhatsApp handler to use logger, remove code for storing logs on status objects
+
+v7.5.12
+----------
+ * Adjust LINE to support sending attachments with quick replies later
+
+v7.5.11
+----------
+ * Rework more channel types to pass back traces and errors via logger instead of on status object
+
+v7.5.10
+----------
+ * Update to latest gocommon and fix some go warnings
+ * Support media attachments for LINE
+ * Rework handler DescribeURN methods to take a channel logger
+ * Update more sending to use channel logger
+
+v7.5.9
+----------
+ * Rename S3MediaBucket to S3AttachmentsBucket and S3MediaPrefix to S3AttachmentsPrefix
+ * More handlers to use new HTTP functions
+
+v7.5.8
+----------
+ * Move testing code out of courier package and into new test package
+ * Rework some handler sending to record logs via a logger rather than on the status object
+
+v7.5.7
+----------
+ * Convert remaining channel types to use httpx.Trace
+
+v7.5.6
+----------
+ * Fix URLs from non-resolved attachments that may not be properly escaped
+ * Use httpx.DoTrace for some channels
+ * Convert telegram handler to use ResolveAttachments
+ * Add support for resolving media on the backend
+
+v7.5.5
+----------
+ * Switch to using null.Map instead of utils.NullMap
+
+v7.5.4
+----------
+ * Add AWS Cred Chain support for S3
+ * Update deps and fix incorrect errors import in some handler packages
+
+v7.5.3
+----------
+ * Fix receiving attachments in WAC
+
+v7.5.2
+----------
+ * Support receiving LINE attachments
+
+v7.5.1
+----------
+ * Support Quick replies for LINE channels
+ * Slack channel support
+
+v7.5.0
+----------
+ * Fix receiving quick replies and list replies in WAC
+ * Add link preview support in WAC
+
+v7.4.0
+----------
+ * Update README
+ * Use analytics package from gocommon
+
+v7.3.10
+----------
+ * Make sure text are sent after audio attachments for WA channels
+
+v7.3.9
+----------
+ * Add arm64 as a build target
+ * Add support for WA Cloud API
+ * Refactor FBA tests
+
+v7.3.8
+----------
+ * Add log to status first when handling telegram opt outs
+
+v7.3.7
+----------
+ * Fix to not stop contact for other errors
+
+v7.3.6
+----------
+ * Update to go 1.18 and latest gocommon/phonenumbers/jsonparser
+
+v7.3.5
+----------
+ * Update Start Mobile send URL
+
+v7.3.4
+----------
+ * Update WhatsApp handler so that we update the URN if the returned ID doesn't match
+ * Stop Telegram contact that have blocked the channel bot
+
+v7.3.3
+----------
+ * Quick fix to stop JSON content being omitted in logs
+
+v7.3.2
+----------
+ * Update to latest gocommon and start using httpx.DetectContentType
+ * Add link preview attribute for sending whatsapp
+ * Update golang.org/x/sys
+
+v7.3.1
+----------
+ * Fix handling stops via status callbacks on Twilio
+
+v7.3.0
+----------
+ * Support stopping contacts when we get stop events on status callbacks
+
+v7.2.0
+----------
+ * CI testing with go 1.17.7
+
+v7.1.19
+----------
+ * Update D3 handler to support check for whatsapp contact not in contact store
+
+v7.1.18
+----------
+ * Fix type for IsDeleted field for IG unsend events
+ * Fix metadata fetching for new Facebook contacts
+
+v7.1.17
+----------
+ * Fix whatsapp uploaded attachment file name
+ * Use deleted by sender visibity for message unsent on IG channels
+ * Add missing languages from whatsapp template
+ * Do not save any message when receiving IG story mentions
+
+v7.1.16
+----------
+ * Update to latest gocommon
+ * Pause WA channel bulk queue when we hit the spam rate limit
+
+v7.1.15
+----------
+ * Fix Gujarati whatsapp language code
+ * Send flow name as user_data to HX
+
+v7.1.14
+----------
+ * Allow more active redis connections
+ * Support sending WA quick replies when we have attachments too
+ * Add support to receive button text from Twilio WhatsApp
+
+v7.1.13
+----------
+ * Send db and redis stats to librato in backed heartbeat
+ * Include session_status in FCM payloads
+
+v7.1.12
+----------
+ * Update to latest gocommon
+ * Add instagram handler
+
+v7.1.11
+----------
+ * More bulk sql tweaks
+
+v7.1.10
+----------
+ * Update to latest gocommon
+
+v7.1.9
+----------
+ * Fix bulk status updates
+
+v7.1.8
+----------
+ * Do more error wrapping when creating contacts and URNs
+
+v7.1.7
+----------
+ * Use dbutil package from gocommon
+ * Add quick replies for vk
+
+v7.1.6
+----------
+ * Throttle WA queues when we get 429 responses
+
 v7.1.5
 ----------
  * Add Msg.failed_reason and set when msg fails due to reaching error limit

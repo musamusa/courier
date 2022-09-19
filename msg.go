@@ -17,7 +17,7 @@ import (
 var ErrMsgNotFound = errors.New("message not found")
 
 // ErrWrongIncomingMsgStatus use do ignore the status update if the DB raise this
-var ErrWrongIncomingMsgStatus = errors.New("Incoming messages can only be PENDING or HANDLED")
+var ErrWrongIncomingMsgStatus = errors.New("incoming messages can only be PENDING or HANDLED")
 
 // MsgID is our typing of the db int type
 type MsgID null.Int
@@ -78,6 +78,11 @@ func NewMsgUUIDFromString(uuidString string) MsgUUID {
 	return MsgUUID{uuid}
 }
 
+type FlowReference struct {
+	UUID string `json:"uuid" validate:"uuid4"`
+	Name string `json:"name"`
+}
+
 //-----------------------------------------------------------------------------
 // Msg interface
 //-----------------------------------------------------------------------------
@@ -98,6 +103,10 @@ type Msg interface {
 	ResponseToExternalID() string
 	IsResend() bool
 
+	Flow() *FlowReference
+	FlowName() string
+	FlowUUID() string
+
 	Channel() Channel
 
 	ReceivedOn() *time.Time
@@ -113,6 +122,7 @@ type Msg interface {
 	WithAttachment(url string) Msg
 	WithURNAuth(auth string) Msg
 	WithMetadata(metadata json.RawMessage) Msg
+	WithFlow(flow *FlowReference) Msg
 
 	EventID() int64
 	SessionStatus() string
