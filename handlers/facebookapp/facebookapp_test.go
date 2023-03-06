@@ -705,6 +705,26 @@ var testCasesWAC = []ChannelHandleTestCase{
 		PrepRequest:           addInvalidSignature,
 	},
 	{
+		Label:                 "Receive Message WAC with error message",
+		URL:                   wacReceiveURL,
+		Data:                  string(test.ReadFile("./testdata/wac/errorMsg.json")),
+		ExpectedRespStatus:    200,
+		ExpectedBodyContains:  "Handled",
+		ExpectedErrors:        []*courier.ChannelError{courier.ErrorExternal("131051", "Unsupported message type")},
+		NoInvalidChannelCheck: true,
+		PrepRequest:           addValidSignature,
+	},
+	{
+		Label:                 "Receive error message",
+		URL:                   wacReceiveURL,
+		Data:                  string(test.ReadFile("./testdata/wac/errorErrors.json")),
+		ExpectedRespStatus:    200,
+		ExpectedBodyContains:  "Handled",
+		ExpectedErrors:        []*courier.ChannelError{courier.ErrorExternal("0", "We were unable to authenticate the app user")},
+		NoInvalidChannelCheck: true,
+		PrepRequest:           addValidSignature,
+	},
+	{
 		Label:                "Receive Valid Status",
 		URL:                  wacReceiveURL,
 		Data:                 string(test.ReadFile("./testdata/wac/validStatusWAC.json")),
@@ -712,6 +732,17 @@ var testCasesWAC = []ChannelHandleTestCase{
 		ExpectedBodyContains: `"type":"status"`,
 		ExpectedMsgStatus:    "S",
 		ExpectedExternalID:   "external_id",
+		PrepRequest:          addValidSignature,
+	},
+	{
+		Label:                "Receive Valid Status with error message",
+		URL:                  wacReceiveURL,
+		Data:                 string(test.ReadFile("./testdata/wac/errorStatus.json")),
+		ExpectedRespStatus:   200,
+		ExpectedBodyContains: `"type":"status"`,
+		ExpectedMsgStatus:    "F",
+		ExpectedExternalID:   "external_id",
+		ExpectedErrors:       []*courier.ChannelError{courier.ErrorExternal("131014", "Request for url https://URL.jpg failed with error: 404 (Not Found)")},
 		PrepRequest:          addValidSignature,
 	},
 	{
@@ -1002,7 +1033,7 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		MockResponseBody:   `{ "is_error": true }`,
 		MockResponseStatus: 200,
 		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []courier.ChannelError{courier.NewChannelError("unable to get message_id from body", "")},
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
 		SendPrep:           setSendURL,
 	},
 	{
@@ -1011,6 +1042,27 @@ var SendTestCasesFBA = []ChannelSendTestCase{
 		MsgURN:             "facebook:12345",
 		MockResponseBody:   `{ "is_error": true }`,
 		MockResponseStatus: 403,
+		ExpectedMsgStatus:  "E",
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
+		SendPrep:           setSendURL,
+	},
+	{
+		Label:              "Error Bad JSON",
+		MsgText:            "Error",
+		MsgURN:             "facebook:12345",
+		MockResponseBody:   `bad json`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
+		ExpectedMsgStatus:  "E",
+		SendPrep:           setSendURL,
+	},
+	{
+		Label:              "Error external",
+		MsgText:            "Error",
+		MsgURN:             "facebook:12345",
+		MockResponseBody:   `{ "error": {"message": "The image size is too large.","code": 36000 }}`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("36000", "The image size is too large.")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
 	},
@@ -1115,7 +1167,7 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		MockResponseBody:   `{ "is_error": true }`,
 		MockResponseStatus: 200,
 		ExpectedMsgStatus:  "E",
-		ExpectedErrors:     []courier.ChannelError{courier.NewChannelError("unable to get message_id from body", "")},
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
 		SendPrep:           setSendURL,
 	},
 	{
@@ -1124,6 +1176,27 @@ var SendTestCasesIG = []ChannelSendTestCase{
 		MsgURN:             "instagram:12345",
 		MockResponseBody:   `{ "is_error": true }`,
 		MockResponseStatus: 403,
+		ExpectedMsgStatus:  "E",
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseValueMissing("message_id")},
+		SendPrep:           setSendURL,
+	},
+	{
+		Label:              "Error Bad JSON",
+		MsgText:            "Error",
+		MsgURN:             "instagram:12345",
+		MockResponseBody:   `bad json`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
+		ExpectedMsgStatus:  "E",
+		SendPrep:           setSendURL,
+	},
+	{
+		Label:              "Error external",
+		MsgText:            "Error",
+		MsgURN:             "instagram:12345",
+		MockResponseBody:   `{ "error": {"message": "The image size is too large.","code": 36000 }}`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("36000", "The image size is too large.")},
 		ExpectedMsgStatus:  "E",
 		SendPrep:           setSendURL,
 	},
@@ -1218,9 +1291,10 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		Label:               "Template Send",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "eng",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "157b5e14568e8",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","sub_type":"","index":"","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -1230,7 +1304,8 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		Label:               "Template Country Language",
 		MsgText:             "templated message",
 		MsgURN:              "whatsapp:250788123123",
-		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "country": "US", "variables": ["Chef", "tomorrow"]}}`),
+		MsgLocale:           "eng-US",
+		MsgMetadata:         json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "variables": ["Chef", "tomorrow"]}}`),
 		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
 		MockResponseStatus:  200,
 		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en_US"},"components":[{"type":"body","sub_type":"","index":"","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
@@ -1239,11 +1314,17 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:          "Template Invalid Language",
-		MsgText:        "templated message",
-		MsgURN:         "whatsapp:250788123123",
-		MsgMetadata:    json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}}`),
-		ExpectedErrors: []courier.ChannelError{courier.NewChannelError(`unable to decode template: {"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}} for channel: 8eb23e93-5ecb-45ba-b726-3b064e0c56ab: unable to find mapping for language: bnt`, "")},
+		Label:               "Template Invalid Language",
+		MsgText:             "templated message",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "bnt",
+		MsgMetadata:         json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "variables": ["Chef", "tomorrow"]}}`),
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  200,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"template","template":{"name":"revive_issue","language":{"policy":"deterministic","code":"en"},"components":[{"type":"body","sub_type":"","index":"","parameters":[{"type":"text","text":"Chef"},{"type":"text","text":"tomorrow"}]}]}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
 	},
 	{
 		Label:               "Interactive Button Message Send",
@@ -1270,21 +1351,76 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		SendPrep:            setSendURL,
 	},
 	{
-		Label:           "Interactive Button Message Send with attachment",
+		Label:               "Interactive List Message Send In Spanish",
+		MsgText:             "Hola",
+		MsgURN:              "whatsapp:250788123123",
+		MsgLocale:           "spa",
+		MsgQuickReplies:     []string{"ROW1", "ROW2", "ROW3", "ROW4"},
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  201,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"list","body":{"text":"Hola"},"action":{"button":"Menú","sections":[{"rows":[{"id":"0","title":"ROW1"},{"id":"1","title":"ROW2"},{"id":"2","title":"ROW3"},{"id":"3","title":"ROW4"}]}]}}}`,
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Interactive Button Message Send with image attachment",
+		MsgText:             "Interactive Button Msg",
+		MsgURN:              "whatsapp:250788123123",
+		MsgQuickReplies:     []string{"BUTTON1"},
+		MsgAttachments:      []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  201,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"button","header":{"type":"image","image":{"link":"https://foo.bar/image.jpg"}},"body":{"text":"Interactive Button Msg"},"action":{"buttons":[{"type":"reply","reply":{"id":"0","title":"BUTTON1"}}]}}}`,
+		ExpectedRequestPath: "/12345_ID/messages",
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Interactive Button Message Send with video attachment",
+		MsgText:             "Interactive Button Msg",
+		MsgURN:              "whatsapp:250788123123",
+		MsgQuickReplies:     []string{"BUTTON1"},
+		MsgAttachments:      []string{"video/mp4:https://foo.bar/video.mp4"},
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  201,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"button","header":{"type":"video","video":{"link":"https://foo.bar/video.mp4"}},"body":{"text":"Interactive Button Msg"},"action":{"buttons":[{"type":"reply","reply":{"id":"0","title":"BUTTON1"}}]}}}`,
+		ExpectedRequestPath: "/12345_ID/messages",
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:               "Interactive Button Message Send with document attachment",
+		MsgText:             "Interactive Button Msg",
+		MsgURN:              "whatsapp:250788123123",
+		MsgQuickReplies:     []string{"BUTTON1"},
+		MsgAttachments:      []string{"document/pdf:https://foo.bar/document.pdf"},
+		MockResponseBody:    `{ "messages": [{"id": "157b5e14568e8"}] }`,
+		MockResponseStatus:  201,
+		ExpectedRequestBody: `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"button","header":{"type":"document","document":{"link":"https://foo.bar/document.pdf","filename":"document.pdf"}},"body":{"text":"Interactive Button Msg"},"action":{"buttons":[{"type":"reply","reply":{"id":"0","title":"BUTTON1"}}]}}}`,
+		ExpectedRequestPath: "/12345_ID/messages",
+		ExpectedMsgStatus:   "W",
+		ExpectedExternalID:  "157b5e14568e8",
+		SendPrep:            setSendURL,
+	},
+	{
+		Label:           "Interactive Button Message Send with audio attachment",
 		MsgText:         "Interactive Button Msg",
 		MsgURN:          "whatsapp:250788123123",
-		MsgQuickReplies: []string{"BUTTON1"},
-		MsgAttachments:  []string{"image/jpeg:https://foo.bar/image.jpg"},
+		MsgQuickReplies: []string{"ROW1", "ROW2", "ROW3"},
+		MsgAttachments:  []string{"audio/mp3:https://foo.bar/audio.mp3"},
 		MockResponses: map[MockedRequest]*httpx.MockResponse{
 			{
 				Method: "POST",
 				Path:   "/12345_ID/messages",
-				Body:   `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"image","image":{"link":"https://foo.bar/image.jpg"}}`,
+				Body:   `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"audio","audio":{"link":"https://foo.bar/audio.mp3"}}`,
 			}: httpx.NewMockResponse(201, nil, []byte(`{ "messages": [{"id": "157b5e14568e8"}] }`)),
 			{
 				Method: "POST",
 				Path:   "/12345_ID/messages",
-				Body:   `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"button","body":{"text":"Interactive Button Msg"},"action":{"buttons":[{"type":"reply","reply":{"id":"0","title":"BUTTON1"}}]}}}`,
+				Body:   `{"messaging_product":"whatsapp","recipient_type":"individual","to":"250788123123","type":"interactive","interactive":{"type":"button","body":{"text":"Interactive Button Msg"},"action":{"buttons":[{"type":"reply","reply":{"id":"0","title":"ROW1"}},{"type":"reply","reply":{"id":"1","title":"ROW2"}},{"type":"reply","reply":{"id":"2","title":"ROW3"}}]}}}`,
 			}: httpx.NewMockResponse(201, nil, []byte(`{ "messages": [{"id": "157b5e14568e8"}] }`)),
 		},
 		ExpectedMsgStatus:  "W",
@@ -1324,6 +1460,26 @@ var SendTestCasesWAC = []ChannelSendTestCase{
 		ExpectedMsgStatus:   "W",
 		ExpectedExternalID:  "157b5e14568e8",
 		SendPrep:            setSendURL,
+	},
+	{
+		Label:              "Error Bad JSON",
+		MsgText:            "Error",
+		MsgURN:             "whatsapp:250788123123",
+		MockResponseBody:   `bad json`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorResponseUnparseable("JSON")},
+		ExpectedMsgStatus:  "E",
+		SendPrep:           setSendURL,
+	},
+	{
+		Label:              "Error",
+		MsgText:            "Error",
+		MsgURN:             "whatsapp:250788123123",
+		MockResponseBody:   `{ "error": {"message": "(#130429) Rate limit hit","code": 130429 }}`,
+		MockResponseStatus: 403,
+		ExpectedErrors:     []*courier.ChannelError{courier.ErrorExternal("130429", "(#130429) Rate limit hit")},
+		ExpectedMsgStatus:  "E",
+		SendPrep:           setSendURL,
 	},
 }
 
@@ -1375,19 +1531,31 @@ func TestBuildMediaRequest(t *testing.T) {
 	s := newServer(mb)
 	wacHandler := &handler{NewBaseHandlerWithParams(courier.ChannelType("WAC"), "WhatsApp Cloud", false, nil)}
 	wacHandler.Initialize(s)
-	req, _ := wacHandler.BuildDownloadMediaRequest(context.Background(), mb, testChannelsWAC[0], "https://example.org/v1/media/41")
+	req, _ := wacHandler.BuildAttachmentRequest(context.Background(), mb, testChannelsWAC[0], "https://example.org/v1/media/41", nil)
 	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
 	assert.Equal(t, "Bearer wac_admin_system_user_token", req.Header.Get("Authorization"))
 
 	fbaHandler := &handler{NewBaseHandlerWithParams(courier.ChannelType("FBA"), "Facebook", false, nil)}
 	fbaHandler.Initialize(s)
-	req, _ = fbaHandler.BuildDownloadMediaRequest(context.Background(), mb, testChannelsFBA[0], "https://example.org/v1/media/41")
+	req, _ = fbaHandler.BuildAttachmentRequest(context.Background(), mb, testChannelsFBA[0], "https://example.org/v1/media/41", nil)
 	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
 	assert.Equal(t, http.Header{}, req.Header)
 
 	igHandler := &handler{NewBaseHandlerWithParams(courier.ChannelType("IG"), "Instagram", false, nil)}
 	igHandler.Initialize(s)
-	req, _ = igHandler.BuildDownloadMediaRequest(context.Background(), mb, testChannelsFBA[0], "https://example.org/v1/media/41")
+	req, _ = igHandler.BuildAttachmentRequest(context.Background(), mb, testChannelsFBA[0], "https://example.org/v1/media/41", nil)
 	assert.Equal(t, "https://example.org/v1/media/41", req.URL.String())
 	assert.Equal(t, http.Header{}, req.Header)
+}
+
+func TestGetSupportedLanguage(t *testing.T) {
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.NilLocale))
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.Locale("eng")))
+	assert.Equal(t, languageInfo{"en_US", "Menu"}, getSupportedLanguage(courier.Locale("eng-US")))
+	assert.Equal(t, languageInfo{"pt_PT", "Menu"}, getSupportedLanguage(courier.Locale("por")))
+	assert.Equal(t, languageInfo{"pt_PT", "Menu"}, getSupportedLanguage(courier.Locale("por-PT")))
+	assert.Equal(t, languageInfo{"pt_BR", "Menu"}, getSupportedLanguage(courier.Locale("por-BR")))
+	assert.Equal(t, languageInfo{"fil", "Menu"}, getSupportedLanguage(courier.Locale("fil")))
+	assert.Equal(t, languageInfo{"fr", "Menu"}, getSupportedLanguage(courier.Locale("fra-CA")))
+	assert.Equal(t, languageInfo{"en", "Menu"}, getSupportedLanguage(courier.Locale("run")))
 }

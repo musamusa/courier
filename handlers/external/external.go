@@ -116,7 +116,7 @@ func (h *handler) receiveStopContact(ctx context.Context, channel courier.Channe
 	if err != nil {
 		return nil, err
 	}
-	return []courier.Event{channelEvent}, courier.WriteChannelEventSuccess(ctx, w, channelEvent)
+	return []courier.Event{channelEvent}, courier.WriteChannelEventSuccess(w, channelEvent)
 }
 
 // utility function to grab the form value for either the passed in name (if non-empty) or the first set
@@ -223,7 +223,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 func (h *handler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWriter, msgs []courier.Msg) error {
 	moResponse := msgs[0].Channel().StringConfigForKey(configMOResponse, "")
 	if moResponse == "" {
-		return courier.WriteMsgSuccess(ctx, w, msgs)
+		return courier.WriteMsgSuccess(w, msgs)
 	}
 	moResponseContentType := msgs[0].Channel().StringConfigForKey(configMOResponseContentType, "")
 	if moResponseContentType != "" {
@@ -266,7 +266,7 @@ func (h *handler) receiveStatus(ctx context.Context, statusString string, channe
 	}
 
 	// write our status
-	status := h.Backend().NewMsgStatusForID(channel, courier.NewMsgID(form.ID), msgStatus, clog)
+	status := h.Backend().NewMsgStatusForID(channel, courier.MsgID(form.ID), msgStatus, clog)
 	return handlers.WriteMsgStatusAndResponse(ctx, h, channel, status, w, r)
 }
 
@@ -279,7 +279,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 	// figure out what encoding to tell kannel to send as
 	encoding := msg.Channel().StringConfigForKey(configEncoding, encodingDefault)
-	responseContent := msg.Channel().StringConfigForKey(configMTResponseCheck, "")
+	responseCheck := msg.Channel().StringConfigForKey(configMTResponseCheck, "")
 	sendMethod := msg.Channel().StringConfigForKey(courier.ConfigSendMethod, http.MethodPost)
 	sendBody := msg.Channel().StringConfigForKey(courier.ConfigSendBody, "")
 	contentType := msg.Channel().StringConfigForKey(courier.ConfigContentType, contentURLEncoded)
@@ -299,7 +299,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 			"to_no_plus":     strings.TrimPrefix(msg.URN().Path(), "+"),
 			"from":           msg.Channel().Address(),
 			"from_no_plus":   strings.TrimPrefix(msg.Channel().Address(), "+"),
-			"channel":        msg.Channel().UUID().String(),
+			"channel":        string(msg.Channel().UUID()),
 			"session_status": msg.SessionStatus(),
 		}
 
@@ -366,10 +366,10 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 			return status, nil
 		}
 
-		if responseContent == "" || strings.Contains(string(respBody), responseContent) {
+		if responseCheck == "" || strings.Contains(string(respBody), responseCheck) {
 			status.SetStatus(courier.MsgWired)
 		} else {
-			clog.Error(fmt.Errorf("Received invalid response content: %s", string(respBody)))
+			clog.Error(courier.ErrorResponseUnexpected(responseCheck))
 		}
 	}
 

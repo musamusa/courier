@@ -12,7 +12,6 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/httpx"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -69,7 +68,7 @@ func (h *handler) receiveMessage(ctx context.Context, c courier.Channel, w http.
 	if secret != "" {
 		authorization := r.Header.Get("Authorization")
 		if authorization != fmt.Sprintf("Token %s", secret) {
-			return nil, courier.WriteAndLogUnauthorized(ctx, w, r, c, fmt.Errorf("invalid Authorization header"))
+			return nil, courier.WriteAndLogUnauthorized(w, r, c, fmt.Errorf("invalid Authorization header"))
 		}
 	}
 
@@ -121,7 +120,7 @@ func (h *handler) receiveEvent(ctx context.Context, c courier.Channel, w http.Re
 	if secret != "" {
 		authorization := r.Header.Get("Authorization")
 		if authorization != fmt.Sprintf("Token %s", secret) {
-			return nil, courier.WriteAndLogUnauthorized(ctx, w, r, c, fmt.Errorf("invalid Authorization header"))
+			return nil, courier.WriteAndLogUnauthorized(w, r, c, fmt.Errorf("invalid Authorization header"))
 		}
 	}
 
@@ -205,7 +204,7 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 		externalID, err := jsonparser.GetString(respBody, "result", "message_id")
 		if err != nil {
-			clog.Error(errors.Errorf("unable to get result.message_id from body"))
+			clog.Error(courier.ErrorResponseValueMissing("message_id"))
 			return status, nil
 		}
 

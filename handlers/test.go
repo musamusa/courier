@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,7 @@ type ChannelHandleTestCase struct {
 	ExpectedMsgID        int64
 	ExpectedEvent        courier.ChannelEventType
 	ExpectedEventExtra   map[string]interface{}
+	ExpectedErrors       []*courier.ChannelError
 }
 
 // MockedRequest is a fake HTTP request
@@ -221,6 +223,9 @@ func RunChannelTestCases(t *testing.T, channels []courier.Channel, handler couri
 			// if we're expecting a message, status or event, check we have a log for it
 			if tc.ExpectedMsgText != nil || tc.ExpectedMsgStatus != "" || tc.ExpectedEvent != "" {
 				assert.Greater(t, len(mb.WrittenChannelLogs()), 0, "expected at least one channel log")
+
+				clog := mb.WrittenChannelLogs()[0]
+				assert.Equal(t, tc.ExpectedErrors, clog.Errors(), "unexpected errors logged")
 			}
 		})
 	}
@@ -257,6 +262,7 @@ type ChannelSendTestCase struct {
 	MsgURNAuth              string
 	MsgAttachments          []string
 	MsgQuickReplies         []string
+	MsgLocale               courier.Locale
 	MsgTopic                string
 	MsgHighPriority         bool
 	MsgResponseToExternalID string
@@ -269,12 +275,13 @@ type ChannelSendTestCase struct {
 
 	ExpectedRequestPath string
 	ExpectedURLParams   map[string]string
-	ExpectedPostParams  map[string]string
+	ExpectedPostParams  map[string]string // deprecated, use ExpectedPostForm
+	ExpectedPostForm    url.Values
 	ExpectedRequestBody string
 	ExpectedHeaders     map[string]string
 	ExpectedMsgStatus   courier.MsgStatusValue
 	ExpectedExternalID  string
-	ExpectedErrors      []courier.ChannelError
+	ExpectedErrors      []*courier.ChannelError
 	ExpectedStopEvent   bool
 	ExpectedContactURNs map[string]bool
 	ExpectedNewURN      string
@@ -298,7 +305,8 @@ func RunChannelSendTestCases(t *testing.T, channel courier.Channel, handler cour
 		t.Run(tc.Label, func(t *testing.T) {
 			require := require.New(t)
 
-			msg := mb.NewOutgoingMsg(channel, courier.NewMsgID(10), urns.URN(tc.MsgURN), tc.MsgText, tc.MsgHighPriority, tc.MsgQuickReplies, tc.MsgTopic, tc.MsgResponseToExternalID)
+			msg := mb.NewOutgoingMsg(channel, 10, urns.URN(tc.MsgURN), tc.MsgText, tc.MsgHighPriority, tc.MsgQuickReplies, tc.MsgTopic, tc.MsgResponseToExternalID)
+			msg.WithLocale(tc.MsgLocale)
 
 			for _, a := range tc.MsgAttachments {
 				msg.WithAttachment(a)
@@ -346,9 +354,9 @@ func RunChannelSendTestCases(t *testing.T, channel courier.Channel, handler cour
 			status, err := handler.Send(ctx, msg, clog)
 			cancel()
 
-			// we don't currently distinguish between a returned error and logged errors
-			if err != nil {
-				clog.Error(err)
+			// sender adds returned error to channel log if there aren't other logged errors
+			if err != nil && len(clog.Errors()) == 0 {
+				clog.RawError(err)
 			}
 
 			assert.Equal(t, tc.ExpectedErrors, clog.Errors(), "unexpected errors logged")
@@ -372,6 +380,10 @@ func RunChannelSendTestCases(t *testing.T, channel courier.Channel, handler cour
 					value := testRequest.PostFormValue(k)
 					require.Equal(v, value)
 				}
+			} else if tc.ExpectedPostForm != nil {
+				require.NotNil(testRequest, "post body should not be nil")
+				testRequest.ParseMultipartForm(32 << 20)
+				assert.Equal(t, tc.ExpectedPostForm, testRequest.PostForm)
 			}
 
 			if tc.ExpectedRequestBody != "" {

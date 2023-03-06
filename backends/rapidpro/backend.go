@@ -8,17 +8,19 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/gomodule/redigo/redis"
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/batch"
 	"github.com/nyaruka/courier/queue"
-	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/analytics"
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/jsonx"
@@ -51,7 +53,11 @@ func (b *backend) GetChannel(ctx context.Context, ct courier.ChannelType, uuid c
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	return getChannel(timeout, b.db, ct, uuid)
+	ch, err := getChannel(timeout, b.db, ct, uuid)
+	if err != nil {
+		return nil, err // so we don't return a non-nil interface and nil ptr
+	}
+	return ch, err
 }
 
 // GetChannelByAddress returns the channel with the passed in type and address
@@ -59,7 +65,11 @@ func (b *backend) GetChannelByAddress(ctx context.Context, ct courier.ChannelTyp
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	return getChannelByAddress(timeout, b.db, ct, address)
+	ch, err := getChannelByAddress(timeout, b.db, ct, address)
+	if err != nil {
+		return nil, err // so we don't return a non-nil interface and nil ptr
+	}
+	return ch, err
 }
 
 // GetContact returns the contact for the passed in channel and URN
@@ -123,7 +133,7 @@ RETURNING
 
 // DeleteMsgWithExternalID delete a message we receive an event that it should be deleted
 func (b *backend) DeleteMsgWithExternalID(ctx context.Context, channel courier.Channel, externalID string) error {
-	_, err := b.db.ExecContext(ctx, updateMsgVisibilityDeletedBySender, string(channel.UUID().String()), externalID)
+	_, err := b.db.ExecContext(ctx, updateMsgVisibilityDeletedBySender, string(channel.UUID()), externalID)
 	if err != nil {
 		return err
 	}
@@ -132,17 +142,16 @@ func (b *backend) DeleteMsgWithExternalID(ctx context.Context, channel courier.C
 
 // NewIncomingMsg creates a new message from the given params
 func (b *backend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, clog *courier.ChannelLog) courier.Msg {
-	// remove any control characters
-	text = utils.CleanString(text)
+	urn = urns.URN(dbutil.ToValidUTF8(string(urn)))
+	text = dbutil.ToValidUTF8(text) // strip out invalid UTF8 and NULL chars
 
-	// create our msg
 	msg := newMsg(MsgIncoming, channel, urn, text, clog)
 
 	// set received on to now
 	msg.WithReceivedOn(time.Now().UTC())
 
 	// have we seen this msg in the past period?
-	prevUUID := checkMsgSeen(b, msg)
+	prevUUID := b.checkMsgSeen(msg)
 	if prevUUID != courier.NilMsgUUID {
 		// if so, use its UUID and that we've been written
 		msg.UUID_ = prevUUID
@@ -179,7 +188,7 @@ func (b *backend) PopNextOutgoingMsg(ctx context.Context) (courier.Msg, error) {
 		dbMsg.workerToken = token
 
 		// clear out our seen incoming messages
-		clearMsgSeen(rc, dbMsg)
+		b.clearMsgSeen(rc, dbMsg)
 
 		return dbMsg, nil
 	}
@@ -296,7 +305,7 @@ func (b *backend) WriteMsgStatus(ctx context.Context, status courier.MsgStatus) 
 	if status.ID() != courier.NilMsgID && status.Status() == courier.MsgErrored {
 		err := b.ClearMsgSent(ctx, status.ID())
 		if err != nil {
-			logrus.WithError(err).WithField("msg", status.ID().String()).Error("error clearing sent flags")
+			logrus.WithError(err).WithField("msg", status.ID()).Error("error clearing sent flags")
 		}
 	}
 
@@ -389,8 +398,8 @@ func (b *backend) WriteChannelLog(ctx context.Context, clog *courier.ChannelLog)
 
 // Check if external ID has been seen in a period
 func (b *backend) CheckExternalIDSeen(msg courier.Msg) courier.Msg {
-	var prevUUID = checkExternalIDSeen(b, msg)
 	m := msg.(*DBMsg)
+	var prevUUID = b.checkExternalIDSeen(m)
 	if prevUUID != courier.NilMsgUUID {
 		// if so, use its UUID and that we've been written
 		m.UUID_ = prevUUID
@@ -401,7 +410,30 @@ func (b *backend) CheckExternalIDSeen(msg courier.Msg) courier.Msg {
 
 // Mark a external ID as seen for a period
 func (b *backend) WriteExternalIDSeen(msg courier.Msg) {
-	writeExternalIDSeen(b, msg)
+	b.writeExternalIDSeen(msg.(*DBMsg))
+}
+
+// SaveAttachment saves an attachment to backend storage
+func (b *backend) SaveAttachment(ctx context.Context, ch courier.Channel, contentType string, data []byte, extension string) (string, error) {
+	// create our filename
+	filename := string(uuids.New())
+	if extension != "" {
+		filename = fmt.Sprintf("%s.%s", filename, extension)
+	}
+
+	orgID := ch.(*DBChannel).OrgID()
+
+	path := filepath.Join(b.config.S3AttachmentsPrefix, strconv.FormatInt(int64(orgID), 10), filename[:4], filename[4:8], filename)
+	if !strings.HasPrefix(path, "/") {
+		path = fmt.Sprintf("/%s", path)
+	}
+
+	storageURL, err := b.storage.Put(ctx, path, contentType, data)
+	if err != nil {
+		return "", errors.Wrapf(err, "error saving attachment to storage (bytes=%d)", len(data))
+	}
+
+	return storageURL, nil
 }
 
 // ResolveMedia resolves the passed in attachment URL to a media object
@@ -587,7 +619,7 @@ func (b *backend) Status() string {
 		tps := parts[1]
 
 		// try to look up our channel
-		channelUUID, _ := courier.NewChannelUUID(uuid)
+		channelUUID := courier.ChannelUUID(uuid)
 		channel, err := getChannel(context.Background(), b.db, courier.AnyChannelType, channelUUID)
 		channelType := "!!"
 		if err == nil {
@@ -722,9 +754,9 @@ func (b *backend) Start() error {
 		if err != nil {
 			return err
 		}
-		b.storage = storage.NewS3(s3Client, b.config.S3AttachmentsBucket, b.config.S3Region, 32)
+		b.storage = storage.NewS3(s3Client, b.config.S3AttachmentsBucket, b.config.S3Region, s3.BucketCannedACLPublicRead, 32)
 	} else {
-		b.storage = storage.NewFS("_storage")
+		b.storage = storage.NewFS("_storage", 0766)
 	}
 
 	// test our storage
@@ -845,6 +877,9 @@ func newBackend(cfg *courier.Config) courier.Backend {
 
 		mediaCache:   redisx.NewIntervalHash("media-lookups", time.Hour*24, 2),
 		mediaMutexes: *syncx.NewHashMutex(8),
+
+		seenMsgs:        redisx.NewIntervalHash("seen-msgs", time.Second*2, 2),
+		seenExternalIDs: redisx.NewIntervalHash("seen-external-ids", time.Hour*24, 2),
 	}
 }
 
@@ -864,6 +899,9 @@ type backend struct {
 
 	mediaCache   *redisx.IntervalHash
 	mediaMutexes syncx.HashMutex
+
+	seenMsgs        *redisx.IntervalHash
+	seenExternalIDs *redisx.IntervalHash
 
 	// both sqlx and redis provide wait stats which are cummulative that we need to convert into increments
 	dbWaitDuration    time.Duration

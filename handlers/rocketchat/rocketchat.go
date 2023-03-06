@@ -61,7 +61,7 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	// check authorization
 	secret := channel.StringConfigForKey(configSecret, "")
 	if fmt.Sprintf("Token %s", secret) != r.Header.Get("Authorization") {
-		return nil, courier.WriteAndLogUnauthorized(ctx, w, r, channel, fmt.Errorf("invalid Authorization header"))
+		return nil, courier.WriteAndLogUnauthorized(w, r, channel, fmt.Errorf("invalid Authorization header"))
 	}
 
 	payload := &moPayload{}
@@ -88,8 +88,8 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 	return handlers.WriteMsgsAndResponse(ctx, h, []courier.Msg{msg}, w, r, clog)
 }
 
-// BuildDownloadMediaRequest download media for message attachment with RC auth_token/user_id set
-func (h *handler) BuildDownloadMediaRequest(ctx context.Context, b courier.Backend, channel courier.Channel, attachmentURL string) (*http.Request, error) {
+// BuildAttachmentRequest download media for message attachment with RC auth_token/user_id set
+func (h *handler) BuildAttachmentRequest(ctx context.Context, b courier.Backend, channel courier.Channel, attachmentURL string, clog *courier.ChannelLog) (*http.Request, error) {
 	adminAuthToken := channel.StringConfigForKey(configAdminAuthToken, "")
 	adminUserID := channel.StringConfigForKey(configAdminUserID, "")
 	if adminAuthToken == "" || adminUserID == "" {
@@ -101,6 +101,8 @@ func (h *handler) BuildDownloadMediaRequest(ctx context.Context, b courier.Backe
 	req.Header.Set("X-User-Id", adminUserID)
 	return req, nil
 }
+
+var _ courier.AttachmentRequestBuilder = (*handler)(nil)
 
 type mtPayload struct {
 	UserURN     string       `json:"user"`

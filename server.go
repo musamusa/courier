@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,7 +19,17 @@ import (
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/analytics"
 	"github.com/nyaruka/gocommon/httpx"
+	"github.com/nyaruka/gocommon/jsonx"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+)
+
+// for use in request.Context
+type contextKey int
+
+const (
+	contextRequestURL contextKey = iota
+	contextRequestStart
 )
 
 // Server is the main interface ChannelHandlers use to interact with backends. It provides an
@@ -62,15 +71,15 @@ func NewServerWithLogger(config *Config, backend Backend, logger *logrus.Logger)
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.Timeout(30 * time.Second))
 
-	chanRouter := chi.NewRouter()
-	router.Mount("/c/", chanRouter)
+	publicRouter := chi.NewRouter()
+	router.Mount("/c/", publicRouter)
 
 	return &server{
 		config:  config,
 		backend: backend,
 
-		router:     router,
-		chanRouter: chanRouter,
+		router:       router,
+		publicRouter: publicRouter,
 
 		stopChan:  make(chan bool),
 		waitGroup: &sync.WaitGroup{},
@@ -106,7 +115,8 @@ func (s *server) Start() error {
 	s.router.NotFound(s.handle404)
 	s.router.MethodNotAllowed(s.handle405)
 	s.router.Get("/", s.handleIndex)
-	s.router.Get("/status", s.handleStatus)
+	s.router.Get("/status", s.basicAuthRequired(s.handleStatus))
+	s.publicRouter.Post("/_fetch-attachment", s.tokenAuthRequired(s.handleFetchAttachment)) // becomes /c/_fetch-attachment
 
 	// initialize our handlers
 	s.initializeChannelHandlers()
@@ -117,6 +127,7 @@ func (s *server) Start() error {
 		Handler:      s.router,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  90 * time.Second,
 	}
 
 	s.waitGroup.Add(1)
@@ -126,11 +137,7 @@ func (s *server) Start() error {
 		defer s.waitGroup.Done()
 		err := s.httpServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			logrus.WithFields(logrus.Fields{
-				"comp":  "server",
-				"state": "stopping",
-				"err":   err,
-			}).Error()
+			logrus.WithFields(logrus.Fields{"comp": "server", "state": "stopping"}).Error(err)
 		}
 	}()
 
@@ -215,9 +222,9 @@ func (s *server) Router() chi.Router { return s.router }
 type server struct {
 	backend Backend
 
-	httpServer *http.Server
-	router     *chi.Mux
-	chanRouter *chi.Mux
+	httpServer   *http.Server
+	router       *chi.Mux
+	publicRouter *chi.Mux
 
 	foreman *Foreman
 
@@ -227,7 +234,7 @@ type server struct {
 	stopChan  chan bool
 	stopped   bool
 
-	routes []string
+	chanRoutes []string // used for index page
 }
 
 func (s *server) initializeChannelHandlers() {
@@ -249,7 +256,7 @@ func (s *server) initializeChannelHandlers() {
 	}
 
 	// sort our route help
-	sort.Strings(s.routes)
+	sort.Strings(s.chanRoutes)
 }
 
 func (s *server) channelHandleWrapper(handler ChannelHandler, handlerFunc ChannelHandleFunc) http.HandlerFunc {
@@ -361,29 +368,54 @@ func (s *server) AddHandlerRoute(handler ChannelHandler, method string, action s
 	if action != "" {
 		path = fmt.Sprintf("%s/%s", path, action)
 	}
-	s.chanRouter.Method(method, path, s.channelHandleWrapper(handler, handlerFunc))
-	s.routes = append(s.routes, fmt.Sprintf("%-20s - %s %s", "/c"+path, handler.ChannelName(), action))
+	s.publicRouter.Method(method, path, s.channelHandleWrapper(handler, handlerFunc))
+	s.chanRoutes = append(s.chanRoutes, fmt.Sprintf("%-20s - %s %s", "/c"+path, handler.ChannelName(), action))
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-
 	var buf bytes.Buffer
-	buf.WriteString("<title>courier</title><body><pre>\n")
+	buf.WriteString("<html><head><title>courier</title></head><body><pre>\n")
 	buf.WriteString(splash)
 	buf.WriteString(s.config.Version)
-
 	buf.WriteString(s.backend.Health())
-
 	buf.WriteString("\n\n")
-	buf.WriteString(strings.Join(s.routes, "\n"))
-	buf.WriteString("</pre></body>")
+	buf.WriteString(strings.Join(s.chanRoutes, "\n"))
+	buf.WriteString("</pre></body></html>")
 	w.Write(buf.Bytes())
+}
+
+func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	var buf bytes.Buffer
+	buf.WriteString("<html><head><title>courier</title></head><body><pre>\n")
+	buf.WriteString(splash)
+	buf.WriteString(s.config.Version)
+	buf.WriteString("\n\n")
+	buf.WriteString(s.backend.Status())
+	buf.WriteString("\n\n")
+	buf.WriteString("</pre></body></html>")
+	w.Write(buf.Bytes())
+}
+
+func (s *server) handleFetchAttachment(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+	defer cancel()
+
+	resp, err := fetchAttachment(ctx, s.backend, r)
+	if err != nil {
+		logrus.WithError(err).Error()
+		WriteError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonx.MustMarshal(resp))
 }
 
 func (s *server) handle404(w http.ResponseWriter, r *http.Request) {
 	logrus.WithField("url", r.URL.String()).WithField("method", r.Method).WithField("resp_status", "404").Info("not found")
 	errors := []interface{}{NewErrorData(fmt.Sprintf("not found: %s", r.URL.String()))}
-	err := WriteDataResponse(context.Background(), w, http.StatusNotFound, "Not Found", errors)
+	err := WriteDataResponse(w, http.StatusNotFound, "Not Found", errors)
 	if err != nil {
 		logrus.WithError(err).Error()
 	}
@@ -392,42 +424,40 @@ func (s *server) handle404(w http.ResponseWriter, r *http.Request) {
 func (s *server) handle405(w http.ResponseWriter, r *http.Request) {
 	logrus.WithField("url", r.URL.String()).WithField("method", r.Method).WithField("resp_status", "405").Info("invalid method")
 	errors := []interface{}{NewErrorData(fmt.Sprintf("method not allowed: %s", r.Method))}
-	err := WriteDataResponse(context.Background(), w, http.StatusMethodNotAllowed, "Method Not Allowed", errors)
+	err := WriteDataResponse(w, http.StatusMethodNotAllowed, "Method Not Allowed", errors)
 	if err != nil {
 		logrus.WithError(err).Error()
 	}
 }
 
-func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if s.config.StatusUsername != "" {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != s.config.StatusUsername || pass != s.config.StatusPassword {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Authenticate"`)
-			w.WriteHeader(401)
-			w.Write([]byte("Unauthorised.\n"))
-			return
+// wraps a handler to make it use basic auth
+func (s *server) basicAuthRequired(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.config.StatusUsername != "" {
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != s.config.StatusUsername || pass != s.config.StatusPassword {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Authenticate"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte("Unauthorized"))
+				return
+			}
 		}
+		h(w, r)
 	}
-
-	var buf bytes.Buffer
-	buf.WriteString("<title>courier</title><body><pre>\n")
-	buf.WriteString(splash)
-	buf.WriteString(s.config.Version)
-
-	buf.WriteString("\n\n")
-	buf.WriteString(s.backend.Status())
-	buf.WriteString("\n\n")
-	buf.WriteString("</pre></body>")
-	w.Write(buf.Bytes())
 }
 
-// for use in request.Context
-type contextKey int
-
-const (
-	contextRequestURL contextKey = iota
-	contextRequestStart
-)
+// wraps a handler to make it use token auth
+func (s *server) tokenAuthRequired(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") || authHeader[7:] != s.config.AuthToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+		h(w, r)
+	}
+}
 
 var splash = `
  ____________                   _____             

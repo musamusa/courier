@@ -13,7 +13,6 @@ import (
 	"github.com/nyaruka/courier"
 	"github.com/nyaruka/courier/handlers"
 	"github.com/nyaruka/gocommon/httpx"
-	"github.com/pkg/errors"
 )
 
 var sendURL = "https://api.infobip.com/sms/1/text/advanced"
@@ -89,7 +88,7 @@ func (h *handler) statusMessage(ctx context.Context, channel courier.Channel, w 
 		statuses = append(statuses, status)
 	}
 
-	return statuses, courier.WriteDataResponse(ctx, w, http.StatusOK, "statuses handled", data)
+	return statuses, courier.WriteDataResponse(w, http.StatusOK, "statuses handled", data)
 }
 
 //	{
@@ -194,10 +193,10 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 	ibMsg := mtPayload{
 		Messages: []mtMessage{
-			mtMessage{
+			{
 				From: msg.Channel().Address(),
 				Destinations: []mtDestination{
-					mtDestination{
+					{
 						To:        strings.TrimLeft(msg.URN().Path(), "+"),
 						MessageID: msg.ID().String(),
 					},
@@ -235,11 +234,11 @@ func (h *handler) Send(ctx context.Context, msg courier.Msg, clog *courier.Chann
 
 	groupID, err := jsonparser.GetInt(respBody, "messages", "[0]", "status", "groupId")
 	if err != nil || (groupID != 1 && groupID != 3) {
-		clog.Error(errors.Errorf("received error status: '%d'", groupID))
+		clog.Error(courier.ErrorResponseValueUnexpected("groupId", "1", "3"))
 		return status, nil
 	}
 
-	externalID, err := jsonparser.GetString(respBody, "messages", "[0]", "messageId")
+	externalID, _ := jsonparser.GetString(respBody, "messages", "[0]", "messageId")
 	if externalID != "" {
 		status.SetExternalID(externalID)
 	}

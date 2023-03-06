@@ -13,6 +13,7 @@ import (
 	// load channel handler packages
 	_ "github.com/nyaruka/courier/handlers/africastalking"
 	_ "github.com/nyaruka/courier/handlers/arabiacell"
+	_ "github.com/nyaruka/courier/handlers/bandwidth"
 	_ "github.com/nyaruka/courier/handlers/blackmyna"
 	_ "github.com/nyaruka/courier/handlers/bongolive"
 	_ "github.com/nyaruka/courier/handlers/burstsms"
@@ -37,6 +38,7 @@ import (
 	_ "github.com/nyaruka/courier/handlers/jasmin"
 	_ "github.com/nyaruka/courier/handlers/jiochat"
 	_ "github.com/nyaruka/courier/handlers/junebug"
+	_ "github.com/nyaruka/courier/handlers/justcall"
 	_ "github.com/nyaruka/courier/handlers/kaleyra"
 	_ "github.com/nyaruka/courier/handlers/kannel"
 	_ "github.com/nyaruka/courier/handlers/line"
