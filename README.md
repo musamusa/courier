@@ -35,7 +35,7 @@ environment variables and parameters and for more details on each option.
 
 ### RapidPro
 
-For use with RapidPro, you will want to configure these settings:
+For use with RapidPro/TextIt, you will want to configure these settings:
 
  * `COURIER_DOMAIN`: The root domain which courier is exposed as (ex `textit.in`)
  * `COURIER_SPOOL_DIR`: A local path where courier can spool files if the database is down, should be writable. (ex: `/home/courier/spool`)
@@ -45,8 +45,8 @@ For use with RapidPro, you will want to configure these settings:
 For writing of message attachments, Courier needs access to an S3 bucket, you can configure access to your bucket via:
 
  * `COURIER_S3_REGION`: The region for your S3 bucket (ex: `ew-west-1`)
- * `COURIER_S3_MEDIA_BUCKET`: The name of your S3 bucket (ex: `dl-courier`)
- * `COURIER_S3_MEDIA_PREFIX`: The prefix to use for filenames of attachments added to your bucket (ex: `attachments`)
+ * `COURIER_S3_ATTACHMENTS_BUCKET`: The name of your S3 bucket (ex: `rp-attachments`)
+ * `COURIER_S3_ATTACHMENTS_PREFIX`: The prefix to use for filenames of attachments added to your bucket (ex: `attachments`)
  * `COURIER_AWS_ACCESS_KEY_ID`: The AWS access key id used to authenticate to AWS
  * `COURIER_AWS_SECRET_ACCESS_KEY` The AWS secret access key used to authenticate to AWS
 
@@ -70,7 +70,7 @@ To run the tests you need to create the test database:
 
 ```
 $ createdb courier_test
-$ createuser -P -E courier
+$ createuser -P -E courier_test
 $ psql -d courier_test -f backends/rapidpro/schema.sql
 $ psql -d courier_test -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO courier;"
 $ psql -d courier_test -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO courier;"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"log/slog"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -14,9 +15,8 @@ import (
 	"github.com/nyaruka/gocommon/dbutil"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
-	"github.com/nyaruka/null/v2"
+	"github.com/nyaruka/null/v3"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // used by unit tests to slow down urn operations to test races
@@ -41,6 +41,27 @@ func (i ContactID) String() string {
 	return "null"
 }
 
+// Contact is our struct for a contact in the database
+type Contact struct {
+	OrgID_ OrgID               `db:"org_id"`
+	ID_    ContactID           `db:"id"`
+	UUID_  courier.ContactUUID `db:"uuid"`
+	Name_  null.String         `db:"name"`
+
+	URNID_ ContactURNID `db:"urn_id"`
+
+	CreatedOn_  time.Time `db:"created_on"`
+	ModifiedOn_ time.Time `db:"modified_on"`
+
+	CreatedBy_  int `db:"created_by_id"`
+	ModifiedBy_ int `db:"modified_by_id"`
+
+	IsNew_ bool
+}
+
+// UUID returns the UUID for this contact
+func (c *Contact) UUID() courier.ContactUUID { return c.UUID_ }
+
 const insertContactSQL = `
 INSERT INTO 
 	contacts_contact(org_id, is_active, status, uuid, created_on, modified_on, created_by_id, modified_by_id, name, ticket_count) 
@@ -49,7 +70,7 @@ RETURNING id
 `
 
 // insertContact inserts the passed in contact, the id field will be populated with the result on success
-func insertContact(tx *sqlx.Tx, contact *DBContact) error {
+func insertContact(tx *sqlx.Tx, contact *Contact) error {
 	rows, err := tx.NamedQuery(insertContactSQL, contact)
 	if err != nil {
 		return err
@@ -81,27 +102,29 @@ WHERE
 `
 
 // contactForURN first tries to look up a contact for the passed in URN, if not finding one then creating one
-func contactForURN(ctx context.Context, b *backend, org OrgID, channel *DBChannel, urn urns.URN, auth string, name string, clog *courier.ChannelLog) (*DBContact, error) {
+func contactForURN(ctx context.Context, b *backend, org OrgID, channel *Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (*Contact, error) {
+	log := slog.With("org_id", org, "urn", urn.Identity(), "channel_uuid", channel.UUID(), "log_uuid", clog.UUID())
+
 	// try to look up our contact by URN
-	contact := &DBContact{}
+	contact := &Contact{}
 	err := b.db.GetContext(ctx, contact, lookupContactFromURNSQL, urn.Identity(), org)
 	if err != nil && err != sql.ErrNoRows {
-		logrus.WithError(err).WithField("urn", urn.Identity()).WithField("org_id", org).Error("error looking up contact")
+		log.Error("error looking up contact by URN", "error", err)
 		return nil, errors.Wrap(err, "error looking up contact by URN")
 	}
 
 	// we found it, return it
 	if err != sql.ErrNoRows {
-		// insert it
 		tx, err := b.db.BeginTxx(ctx, nil)
 		if err != nil {
-			logrus.WithError(err).WithField("urn", urn.Identity()).WithField("org_id", org).Error("error looking up contact")
+			log.Error("error beginning transaction", "error", err)
 			return nil, errors.Wrap(err, "error beginning transaction")
 		}
 
-		err = setDefaultURN(tx, channel, contact, urn, auth)
+		// update contact's URNs so this URN has priority
+		err = setDefaultURN(tx, channel, contact, urn, authTokens)
 		if err != nil {
-			logrus.WithError(err).WithField("urn", urn.Identity()).WithField("org_id", org).Error("error looking up contact")
+			log.Error("error updating default URN for contact", "error", err)
 			tx.Rollback()
 			return nil, errors.Wrap(err, "error setting default URN for contact")
 		}
@@ -127,7 +150,7 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *DBChanne
 
 					// in the case of errors, we log the error but move onwards anyways
 					if err != nil {
-						logrus.WithField("channel_uuid", channel.UUID()).WithField("channel_type", channel.ChannelType()).WithField("urn", urn).WithError(err).Error("unable to describe URN")
+						log.Error("unable to describe URN", "error", err)
 					} else {
 						name = attrs["name"]
 					}
@@ -168,13 +191,13 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *DBChanne
 	// associate our URN
 	// If we've inserted a duplicate URN then we'll get a uniqueness violation.
 	// That means this contact URN was written by someone else after we tried to look it up.
-	contactURN, err := contactURNForURN(tx, channel, contact.ID_, urn, auth)
+	contactURN, err := getOrCreateContactURN(tx, channel, contact.ID_, urn, authTokens)
 	if err != nil {
 		tx.Rollback()
 
 		if dbutil.IsUniqueViolation(err) {
 			// if this was a duplicate URN, start over with a contact lookup
-			return contactForURN(ctx, b, org, channel, urn, auth, name, clog)
+			return contactForURN(ctx, b, org, channel, urn, authTokens, name, clog)
 		}
 		return nil, errors.Wrap(err, "error getting URN for contact")
 	}
@@ -182,7 +205,7 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *DBChanne
 	// we stole the URN from another contact, roll back and start over
 	if contactURN.PrevContactID != NilContactID {
 		tx.Rollback()
-		return contactForURN(ctx, b, org, channel, urn, auth, name, clog)
+		return contactForURN(ctx, b, org, channel, urn, authTokens, name, clog)
 	}
 
 	// all is well, we created the new contact, commit and move forward
@@ -200,24 +223,3 @@ func contactForURN(ctx context.Context, b *backend, org OrgID, channel *DBChanne
 	// and return it
 	return contact, nil
 }
-
-// DBContact is our struct for a contact in the database
-type DBContact struct {
-	OrgID_ OrgID               `db:"org_id"`
-	ID_    ContactID           `db:"id"`
-	UUID_  courier.ContactUUID `db:"uuid"`
-	Name_  null.String         `db:"name"`
-
-	URNID_ ContactURNID `db:"urn_id"`
-
-	CreatedOn_  time.Time `db:"created_on"`
-	ModifiedOn_ time.Time `db:"modified_on"`
-
-	CreatedBy_  int `db:"created_by_id"`
-	ModifiedBy_ int `db:"modified_by_id"`
-
-	IsNew_ bool
-}
-
-// UUID returns the UUID for this contact
-func (c *DBContact) UUID() courier.ContactUUID { return c.UUID_ }

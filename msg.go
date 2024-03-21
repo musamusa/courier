@@ -3,21 +3,14 @@ package courier
 import (
 	"database/sql/driver"
 	"encoding/json"
-	"errors"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/nyaruka/gocommon/i18n"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
-	"github.com/nyaruka/null/v2"
+	"github.com/nyaruka/null/v3"
 )
-
-// ErrMsgNotFound is returned when trying to queue the status for a Msg that doesn't exit
-var ErrMsgNotFound = errors.New("message not found")
-
-// ErrWrongIncomingMsgStatus use do ignore the status update if the DB raise this
-var ErrWrongIncomingMsgStatus = errors.New("incoming messages can only be PENDING or HANDLED")
 
 // MsgID is our typing of the db int type
 type MsgID null.Int64
@@ -44,74 +37,69 @@ type FlowReference struct {
 	Name string `json:"name"`
 }
 
-//-----------------------------------------------------------------------------
-// Locale
-//-----------------------------------------------------------------------------
-
-// Locale is the combination of a language and optional country, e.g. US English, Brazilian Portuguese, encoded as the
-// language code followed by the country code, e.g. eng-US, por-BR
-type Locale string
-
-func (l Locale) ToParts() (string, string) {
-	if l == NilLocale || len(l) < 3 {
-		return "", ""
-	}
-
-	parts := strings.SplitN(string(l), "-", 2)
-	lang := parts[0]
-	country := ""
-	if len(parts) > 1 {
-		country = parts[1]
-	}
-
-	return lang, country
+type OptInReference struct {
+	ID   int64  `json:"id"   validate:"required"`
+	Name string `json:"name" validate:"required"`
 }
 
-var NilLocale = Locale("")
+type UserID int
+
+type MsgOrigin string
+
+const (
+	MsgOriginFlow      MsgOrigin = "flow"
+	MsgOriginBroadcast MsgOrigin = "broadcast"
+	MsgOriginTicket    MsgOrigin = "ticket"
+	MsgOriginChat      MsgOrigin = "chat"
+)
 
 //-----------------------------------------------------------------------------
 // Msg interface
 //-----------------------------------------------------------------------------
 
-// Msg is our interface to represent an incoming or outgoing message
+// Msg is our interface for common methods for an incoming or outgoing message
 type Msg interface {
+	Event
+
 	ID() MsgID
 	UUID() MsgUUID
+	ExternalID() string
 	Text() string
 	Attachments() []string
-	Locale() Locale
-	ExternalID() string
 	URN() urns.URN
-	URNAuth() string
-	ContactName() string
+	Channel() Channel
+}
+
+// MsgOut is our interface to represent an outgoing
+type MsgOut interface {
+	Msg
+
+	// outgoing specific
 	QuickReplies() []string
+	Locale() i18n.Locale
+	URNAuth() string
+	Origin() MsgOrigin
+	ContactLastSeenOn() *time.Time
 	Topic() string
 	Metadata() json.RawMessage
 	ResponseToExternalID() string
-	IsResend() bool
-
-	Flow() *FlowReference
-	FlowName() string
-	FlowUUID() string
-
-	Channel() Channel
-
-	ReceivedOn() *time.Time
 	SentOn() *time.Time
-
-	HighPriority() bool
-
-	WithContactName(name string) Msg
-	WithReceivedOn(date time.Time) Msg
-	WithExternalID(id string) Msg
-	WithID(id MsgID) Msg
-	WithUUID(uuid MsgUUID) Msg
-	WithAttachment(url string) Msg
-	WithLocale(Locale) Msg
-	WithURNAuth(auth string) Msg
-	WithMetadata(metadata json.RawMessage) Msg
-	WithFlow(flow *FlowReference) Msg
-
-	EventID() int64
+	IsResend() bool
+	Flow() *FlowReference
+	OptIn() *OptInReference
+	UserID() UserID
 	SessionStatus() string
+	HighPriority() bool
+}
+
+// MsgIn is our interface to represent an incoming
+type MsgIn interface {
+	Msg
+
+	// incoming specific
+	ReceivedOn() *time.Time
+	WithAttachment(url string) MsgIn
+	WithContactName(name string) MsgIn
+	WithURNAuthTokens(tokens map[string]string) MsgIn
+	WithReceivedOn(date time.Time) MsgIn
 }

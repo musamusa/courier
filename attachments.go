@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -12,7 +13,6 @@ import (
 	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/httpx"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 	"gopkg.in/h2non/filetype.v1"
 )
 
@@ -57,19 +57,21 @@ func fetchAttachment(ctx context.Context, b Backend, r *http.Request) (*fetchAtt
 		return nil, errors.Wrap(err, "error getting channel")
 	}
 
-	clog := NewChannelLogForAttachmentFetch(ch, fa.MsgID, GetHandler(ch.ChannelType()).RedactValues(ch))
+	clog := NewChannelLogForAttachmentFetch(ch, GetHandler(ch.ChannelType()).RedactValues(ch))
 
 	attachment, err := FetchAndStoreAttachment(ctx, b, ch, fa.URL, clog)
 
-	resp := &fetchAttachmentResponse{Attachment: attachment, LogUUID: clog.UUID()}
-
+	// try to write channel log even if we have an error
 	clog.End()
-
 	if err := b.WriteChannelLog(ctx, clog); err != nil {
-		logrus.WithError(err).Error()
+		slog.Error("error writing log", "error", err)
 	}
 
-	return resp, err
+	if err != nil {
+		return nil, err
+	}
+
+	return &fetchAttachmentResponse{Attachment: attachment, LogUUID: clog.UUID()}, nil
 }
 
 func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, attURL string, clog *ChannelLog) (*Attachment, error) {
@@ -87,20 +89,22 @@ func FetchAndStoreAttachment(ctx context.Context, b Backend, channel Channel, at
 	} else {
 		attRequest, err = http.NewRequest(http.MethodGet, attURL, nil)
 	}
-
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create attachment request")
 	}
 
-	trace, err := httpx.DoTrace(utils.GetHTTPClient(), attRequest, nil, nil, maxAttBodyReadBytes)
+	trace, err := httpx.DoTrace(b.HttpClient(true), attRequest, nil, b.HttpAccess(), maxAttBodyReadBytes)
 	if trace != nil {
 		clog.HTTP(trace)
+
+		// if we got a non-200 response, return the attachment with a pseudo content type which tells the caller
+		// to continue without the attachment
+		if trace.Response == nil || trace.Response.StatusCode/100 != 2 || err == httpx.ErrResponseSize || err == httpx.ErrAccessConfig {
+			return &Attachment{ContentType: "unavailable", URL: attURL}, nil
+		}
 	}
 	if err != nil {
 		return nil, err
-	}
-	if trace.Response.StatusCode/100 != 2 {
-		return &Attachment{ContentType: "unavailable", URL: attURL, Size: 0}, nil
 	}
 
 	mimeType := ""

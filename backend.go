@@ -3,9 +3,11 @@ package courier
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gomodule/redigo/redis"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
 )
 
@@ -30,31 +32,31 @@ type Backend interface {
 	GetChannelByAddress(context.Context, ChannelType, ChannelAddress) (Channel, error)
 
 	// GetContact returns (or creates) the contact for the passed in channel and URN
-	GetContact(context.Context, Channel, urns.URN, string, string, *ChannelLog) (Contact, error)
+	GetContact(context.Context, Channel, urns.URN, map[string]string, string, *ChannelLog) (Contact, error)
 
 	// AddURNtoContact adds a URN to the passed in contact
-	AddURNtoContact(context context.Context, channel Channel, contact Contact, urn urns.URN) (urns.URN, error)
+	AddURNtoContact(context context.Context, channel Channel, contact Contact, urn urns.URN, authTokens map[string]string) (urns.URN, error)
 
 	// RemoveURNFromcontact removes a URN from the passed in contact
 	RemoveURNfromContact(context context.Context, channel Channel, contact Contact, urn urns.URN) (urns.URN, error)
 
-	// DeleteMsgWithExternalID delete a message we receive an event that it should be deleted
-	DeleteMsgWithExternalID(ctx context.Context, channel Channel, externalID string) error
+	// DeleteMsgByExternalID deletes a message that has been deleted on the channel side
+	DeleteMsgByExternalID(ctx context.Context, channel Channel, externalID string) error
 
 	// NewIncomingMsg creates a new message from the given params
-	NewIncomingMsg(Channel, urns.URN, string, *ChannelLog) Msg
+	NewIncomingMsg(Channel, urns.URN, string, string, *ChannelLog) MsgIn
 
 	// WriteMsg writes the passed in message to our backend
-	WriteMsg(context.Context, Msg, *ChannelLog) error
+	WriteMsg(context.Context, MsgIn, *ChannelLog) error
 
-	// NewMsgStatusForID creates a new Status object for the given message id
-	NewMsgStatusForID(Channel, MsgID, MsgStatusValue, *ChannelLog) MsgStatus
+	// NewStatusUpdate creates a new status update for the given message id
+	NewStatusUpdate(Channel, MsgID, MsgStatus, *ChannelLog) StatusUpdate
 
-	// NewMsgStatusForExternalID creates a new Status object for the given external id
-	NewMsgStatusForExternalID(Channel, string, MsgStatusValue, *ChannelLog) MsgStatus
+	// NewStatusUpdateByExternalID creates a new status update for the given external id
+	NewStatusUpdateByExternalID(Channel, string, MsgStatus, *ChannelLog) StatusUpdate
 
-	// WriteMsgStatus writes the passed in status update to our backend
-	WriteMsgStatus(context.Context, MsgStatus) error
+	// WriteStatusUpdate writes the passed in status update to our backend
+	WriteStatusUpdate(context.Context, StatusUpdate) error
 
 	// NewChannelEvent creates a new channel event for the given channel and event type
 	NewChannelEvent(Channel, ChannelEventType, urns.URN, *ChannelLog) ChannelEvent
@@ -67,7 +69,7 @@ type Backend interface {
 
 	// PopNextOutgoingMsg returns the next message that needs to be sent, callers should call MarkOutgoingMsgComplete with the
 	// returned message when they have dealt with the message (regardless of whether it was sent or not)
-	PopNextOutgoingMsg(context.Context) (Msg, error)
+	PopNextOutgoingMsg(context.Context) (MsgOut, error)
 
 	// WasMsgSent returns whether the backend thinks the passed in message was already sent. This can be used in cases where
 	// a backend wants to implement a failsafe against double sending messages (say if they were double queued)
@@ -80,19 +82,17 @@ type Backend interface {
 	// MarkOutgoingMsgComplete marks the passed in message as having been processed. Note this should be called even in the case
 	// of errors during sending as it will manage the number of active workers per channel. The optional status parameter can be
 	// used to determine any sort of deduping of msg sends
-	MarkOutgoingMsgComplete(context.Context, Msg, MsgStatus)
-
-	// Check if external ID has been seen in a period
-	CheckExternalIDSeen(Msg) Msg
-
-	// Mark a external ID as seen for a period
-	WriteExternalIDSeen(Msg)
+	MarkOutgoingMsgComplete(context.Context, MsgOut, StatusUpdate)
 
 	// SaveAttachment saves an attachment to backend storage
 	SaveAttachment(context.Context, Channel, string, []byte, string) (string, error)
 
 	// ResolveMedia resolves an outgoing attachment URL to a media object
 	ResolveMedia(context.Context, string) (Media, error)
+
+	// HttpClient returns an HTTP client for making external requests
+	HttpClient(bool) *http.Client
+	HttpAccess() *httpx.AccessConfig
 
 	// Health returns a string describing any health problems the backend has, or empty string if all is well
 	Health() string

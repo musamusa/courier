@@ -2,36 +2,48 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
-	"github.com/go-chi/chi"
 	"github.com/nyaruka/courier"
+	"github.com/nyaruka/gocommon/httpx"
 )
 
 var defaultRedactConfigKeys = []string{courier.ConfigAuthToken, courier.ConfigAPIKey, courier.ConfigSecret, courier.ConfigPassword, courier.ConfigSendAuthorization}
 
 // BaseHandler is the base class for most handlers, it just stored the server, name and channel type for the handler
 type BaseHandler struct {
-	channelType         courier.ChannelType
-	name                string
-	server              courier.Server
-	backend             courier.Backend
-	useChannelRouteUUID bool
-	redactConfigKeys    []string
+	channelType        courier.ChannelType
+	name               string
+	server             courier.Server
+	backend            courier.Backend
+	uuidChannelRouting bool
+	redactConfigKeys   []string
 }
 
 // NewBaseHandler returns a newly constructed BaseHandler with the passed in parameters
-func NewBaseHandler(channelType courier.ChannelType, name string) BaseHandler {
-	return NewBaseHandlerWithParams(channelType, name, true, defaultRedactConfigKeys)
+func NewBaseHandler(channelType courier.ChannelType, name string, options ...func(*BaseHandler)) BaseHandler {
+	h := &BaseHandler{
+		channelType:        channelType,
+		name:               name,
+		uuidChannelRouting: true,
+		redactConfigKeys:   defaultRedactConfigKeys,
+	}
+	for _, o := range options {
+		o(h)
+	}
+	return *h
 }
 
-// NewBaseHandlerWithParams returns a newly constructed BaseHandler with the passed in parameters
-func NewBaseHandlerWithParams(channelType courier.ChannelType, name string, useChannelRouteUUID bool, redactConfigKeys []string) BaseHandler {
-	return BaseHandler{
-		channelType:         channelType,
-		name:                name,
-		useChannelRouteUUID: useChannelRouteUUID,
-		redactConfigKeys:    redactConfigKeys,
+func DisableUUIDRouting() func(*BaseHandler) {
+	return func(s *BaseHandler) {
+		s.uuidChannelRouting = false
+	}
+}
+
+func WithRedactConfigKeys(keys ...string) func(*BaseHandler) {
+	return func(s *BaseHandler) {
+		s.redactConfigKeys = keys
 	}
 }
 
@@ -63,7 +75,7 @@ func (h *BaseHandler) ChannelName() string {
 
 // UseChannelRouteUUID returns whether the router should use the channel UUID in the URL path
 func (h *BaseHandler) UseChannelRouteUUID() bool {
-	return h.useChannelRouteUUID
+	return h.uuidChannelRouting
 }
 
 func (h *BaseHandler) RedactValues(ch courier.Channel) []string {
@@ -83,17 +95,47 @@ func (h *BaseHandler) RedactValues(ch courier.Channel) []string {
 
 // GetChannel returns the channel
 func (h *BaseHandler) GetChannel(ctx context.Context, r *http.Request) (courier.Channel, error) {
-	uuid := courier.ChannelUUID(chi.URLParam(r, "uuid"))
+	uuid := courier.ChannelUUID(r.PathValue("uuid"))
 	return h.backend.GetChannel(ctx, h.ChannelType(), uuid)
 }
 
+// RequestHTTP does the given request, logging the trace, and returns the response
+func (h *BaseHandler) RequestHTTP(req *http.Request, clog *courier.ChannelLog) (*http.Response, []byte, error) {
+	return h.RequestHTTPWithClient(h.backend.HttpClient(true), req, clog)
+}
+
+// RequestHTTP does the given request, logging the trace, and returns the response
+func (h *BaseHandler) RequestHTTPInsecure(req *http.Request, clog *courier.ChannelLog) (*http.Response, []byte, error) {
+	return h.RequestHTTPWithClient(h.backend.HttpClient(false), req, clog)
+}
+
+// RequestHTTP does the given request using the given client, logging the trace, and returns the response
+func (h *BaseHandler) RequestHTTPWithClient(client *http.Client, req *http.Request, clog *courier.ChannelLog) (*http.Response, []byte, error) {
+	var resp *http.Response
+	var body []byte
+
+	req.Header.Set("User-Agent", fmt.Sprintf("Courier/%s", h.server.Config().Version))
+
+	trace, err := httpx.DoTrace(client, req, nil, h.backend.HttpAccess(), 0)
+	if trace != nil {
+		clog.HTTP(trace)
+		resp = trace.Response
+		body = trace.ResponseBody
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resp, body, nil
+}
+
 // WriteStatusSuccessResponse writes a success response for the statuses
-func (h *BaseHandler) WriteStatusSuccessResponse(ctx context.Context, w http.ResponseWriter, statuses []courier.MsgStatus) error {
+func (h *BaseHandler) WriteStatusSuccessResponse(ctx context.Context, w http.ResponseWriter, statuses []courier.StatusUpdate) error {
 	return courier.WriteStatusSuccess(w, statuses)
 }
 
 // WriteMsgSuccessResponse writes a success response for the messages
-func (h *BaseHandler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWriter, msgs []courier.Msg) error {
+func (h *BaseHandler) WriteMsgSuccessResponse(ctx context.Context, w http.ResponseWriter, msgs []courier.MsgIn) error {
 	return courier.WriteMsgSuccess(w, msgs)
 }
 

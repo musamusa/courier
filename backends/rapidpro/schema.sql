@@ -4,7 +4,7 @@ CREATE TABLE orgs_org (
     name character varying(255) NOT NULL,
     language character varying(64),
     is_anon boolean NOT NULL,
-    config text NULL
+    config jsonb NOT NULL
 );
 
 DROP TABLE IF EXISTS channels_channel CASCADE;
@@ -19,8 +19,9 @@ CREATE TABLE channels_channel (
     schemes character varying(16)[] NOT NULL,
     address character varying(64),
     country character varying(2),
-    config text,
+    config jsonb NOT NULL,
     role character varying(4) NOT NULL,
+    log_policy character varying(1) NOT NULL,
     org_id integer references orgs_org(id) on delete cascade
 );
 
@@ -51,8 +52,16 @@ CREATE TABLE contacts_contacturn (
     channel_id integer references channels_channel(id) on delete cascade,
     contact_id integer references contacts_contact(id) on delete cascade,
     org_id integer NOT NULL references orgs_org(id) on delete cascade,
-    auth text,
+    auth_tokens jsonb,
     UNIQUE (org_id, identity)
+);
+
+DROP TABLE IF EXISTS msgs_optin CASCADE;
+CREATE TABLE msgs_optin (
+    id serial primary key,
+    uuid uuid NOT NULL,
+    org_id integer NOT NULL references orgs_org(id) on delete cascade,
+    name character varying(64)
 );
 
 DROP TABLE IF EXISTS msgs_msg CASCADE;
@@ -71,7 +80,7 @@ CREATE TABLE msgs_msg (
     direction character varying(1) NOT NULL,
     status character varying(1) NOT NULL,
     visibility character varying(1) NOT NULL,
-    msg_type character varying(1),
+    msg_type character varying(1) NOT NULL,
     msg_count integer NOT NULL,
     error_count integer NOT NULL,
     next_attempt timestamp with time zone NOT NULL,
@@ -82,7 +91,7 @@ CREATE TABLE msgs_msg (
     contact_urn_id integer NOT NULL references contacts_contacturn(id) on delete cascade,
     org_id integer NOT NULL references orgs_org(id) on delete cascade,
     metadata text,
-    topup_id integer,
+    optin_id integer references msgs_optin(id) on delete cascade,
     delete_from_counts boolean,
     log_uuids uuid[]
 );
@@ -92,7 +101,6 @@ CREATE TABLE channels_channellog (
     id serial primary key,
     uuid uuid NOT NULL,
     channel_id integer NOT NULL references channels_channel(id) on delete cascade,
-    msg_id bigint references msgs_msg(id) on delete cascade,
     log_type character varying(16),
     http_logs jsonb,
     errors jsonb,
@@ -111,6 +119,7 @@ CREATE TABLE channels_channelevent (
     channel_id integer NOT NULL references channels_channel(id) on delete cascade,
     contact_id integer NOT NULL references contacts_contact(id) on delete cascade,
     contact_urn_id integer NOT NULL references contacts_contacturn(id) on delete cascade,
+    optin_id integer references msgs_optin(id) on delete cascade,
     org_id integer NOT NULL references orgs_org(id) on delete cascade,
     log_uuids uuid[]
 );
@@ -138,5 +147,5 @@ CREATE TABLE IF NOT EXISTS msgs_media (
     original_id integer
 );
 
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO courier;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO courier;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO courier_test;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO courier_test;

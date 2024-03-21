@@ -9,8 +9,8 @@ import (
 	"github.com/nyaruka/gocommon/jsonx"
 )
 
-func queueMsgHandling(rc redis.Conn, c *DBContact, m *DBMsg) error {
-	channel := m.Channel().(*DBChannel)
+func queueMsgHandling(rc redis.Conn, c *Contact, m *Msg) error {
+	channel := m.Channel().(*Channel)
 
 	// queue to mailroom
 	body := map[string]any{
@@ -30,60 +30,43 @@ func queueMsgHandling(rc redis.Conn, c *DBContact, m *DBMsg) error {
 	return queueMailroomTask(rc, "msg_event", m.OrgID_, m.ContactID_, body)
 }
 
-func queueChannelEvent(rc redis.Conn, c *DBContact, e *DBChannelEvent) error {
-	// queue to mailroom
+func queueChannelEvent(rc redis.Conn, c *Contact, e *ChannelEvent) error {
+	body := map[string]any{
+		"org_id":      e.OrgID_,
+		"contact_id":  e.ContactID_,
+		"urn_id":      e.ContactURNID_,
+		"channel_id":  e.ChannelID_,
+		"extra":       e.Extra(),
+		"new_contact": c.IsNew_,
+		"occurred_on": e.OccurredOn_,
+		"created_on":  e.CreatedOn_,
+	}
+
 	switch e.EventType() {
-	case courier.StopContact:
-		body := map[string]interface{}{
-			"org_id":      e.OrgID_,
-			"contact_id":  e.ContactID_,
-			"occurred_on": e.OccurredOn_,
-		}
-		return queueMailroomTask(rc, "stop_event", e.OrgID_, e.ContactID_, body)
-
-	case courier.WelcomeMessage:
-		body := map[string]interface{}{
-			"org_id":      e.OrgID_,
-			"contact_id":  e.ContactID_,
-			"urn_id":      e.ContactURNID_,
-			"channel_id":  e.ChannelID_,
-			"new_contact": c.IsNew_,
-			"occurred_on": e.OccurredOn_,
-		}
+	case courier.EventTypeStopContact:
+		return queueMailroomTask(rc, "stop_contact", e.OrgID_, e.ContactID_, body)
+	case courier.EventTypeWelcomeMessage:
 		return queueMailroomTask(rc, "welcome_message", e.OrgID_, e.ContactID_, body)
-
-	case courier.Referral:
-		body := map[string]interface{}{
-			"org_id":      e.OrgID_,
-			"contact_id":  e.ContactID_,
-			"urn_id":      e.ContactURNID_,
-			"channel_id":  e.ChannelID_,
-			"extra":       e.Extra(),
-			"new_contact": c.IsNew_,
-			"occurred_on": e.OccurredOn_,
-		}
+	case courier.EventTypeReferral:
 		return queueMailroomTask(rc, "referral", e.OrgID_, e.ContactID_, body)
-
-	case courier.NewConversation:
-		body := map[string]interface{}{
-			"org_id":      e.OrgID_,
-			"contact_id":  e.ContactID_,
-			"urn_id":      e.ContactURNID_,
-			"channel_id":  e.ChannelID_,
-			"extra":       e.Extra(),
-			"new_contact": c.IsNew_,
-			"occurred_on": e.OccurredOn_,
-		}
+	case courier.EventTypeNewConversation:
 		return queueMailroomTask(rc, "new_conversation", e.OrgID_, e.ContactID_, body)
-
+	case courier.EventTypeOptIn:
+		return queueMailroomTask(rc, "optin", e.OrgID_, e.ContactID_, body)
+	case courier.EventTypeOptOut:
+		return queueMailroomTask(rc, "optout", e.OrgID_, e.ContactID_, body)
 	default:
 		return fmt.Errorf("unknown event type: %s", e.EventType())
 	}
 }
 
+func queueMsgDeleted(rc redis.Conn, ch *Channel, msgID courier.MsgID, contactID ContactID) error {
+	return queueMailroomTask(rc, "msg_deleted", ch.OrgID_, contactID, map[string]any{"org_id": ch.OrgID_, "msg_id": msgID})
+}
+
 // queueMailroomTask queues the passed in task to mailroom. Mailroom processes both messages and
 // channel event tasks through the same ordered queue.
-func queueMailroomTask(rc redis.Conn, taskType string, orgID OrgID, contactID ContactID, body map[string]interface{}) (err error) {
+func queueMailroomTask(rc redis.Conn, taskType string, orgID OrgID, contactID ContactID, body map[string]any) (err error) {
 	// create our event task
 	eventJSON := jsonx.MustMarshal(mrTask{
 		Type:     taskType,
@@ -119,8 +102,8 @@ type mrContactTask struct {
 }
 
 type mrTask struct {
-	Type     string      `json:"type"`
-	OrgID    OrgID       `json:"org_id"`
-	Task     interface{} `json:"task"`
-	QueuedOn time.Time   `json:"queued_on"`
+	Type     string    `json:"type"`
+	OrgID    OrgID     `json:"org_id"`
+	Task     any       `json:"task"`
+	QueuedOn time.Time `json:"queued_on"`
 }

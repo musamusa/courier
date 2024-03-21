@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
 	"github.com/nyaruka/courier"
+	"github.com/nyaruka/courier/utils"
+	"github.com/nyaruka/gocommon/httpx"
 	"github.com/nyaruka/gocommon/urns"
 	"github.com/nyaruka/gocommon/uuids"
 	"github.com/pkg/errors"
@@ -35,23 +38,25 @@ type MockBackend struct {
 	channels          map[courier.ChannelUUID]courier.Channel
 	channelsByAddress map[courier.ChannelAddress]courier.Channel
 	contacts          map[urns.URN]courier.Contact
-	outgoingMsgs      []courier.Msg
+	outgoingMsgs      []courier.MsgOut
 	media             map[string]courier.Media // url -> Media
 	errorOnQueue      bool
 
 	mutex     sync.RWMutex
 	redisPool *redis.Pool
 
-	writtenMsgs          []courier.Msg
-	writtenMsgStatuses   []courier.MsgStatus
+	writtenMsgs          []courier.MsgIn
+	writtenMsgStatuses   []courier.StatusUpdate
 	writtenChannelEvents []courier.ChannelEvent
 	writtenChannelLogs   []*courier.ChannelLog
 	savedAttachments     []*SavedAttachment
+	storageError         error
 
 	lastMsgID       courier.MsgID
 	lastContactName string
+	urnAuthTokens   map[urns.URN]map[string]string
 	sentMsgs        map[courier.MsgID]bool
-	seenExternalIDs []string
+	seenExternalIDs map[string]courier.MsgUUID
 }
 
 // NewMockBackend returns a new mock backend suitable for testing
@@ -84,27 +89,51 @@ func NewMockBackend() *MockBackend {
 		contacts:          make(map[urns.URN]courier.Contact),
 		media:             make(map[string]courier.Media),
 		sentMsgs:          make(map[courier.MsgID]bool),
+		seenExternalIDs:   make(map[string]courier.MsgUUID),
 		redisPool:         redisPool,
 	}
 }
 
-// DeleteMsgWithExternalID delete a message we receive an event that it should be deleted
-func (mb *MockBackend) DeleteMsgWithExternalID(ctx context.Context, channel courier.Channel, externalID string) error {
+// DeleteMsgByExternalID delete a message we receive an event that it should be deleted
+func (mb *MockBackend) DeleteMsgByExternalID(ctx context.Context, channel courier.Channel, externalID string) error {
 	return nil
 }
 
 // NewIncomingMsg creates a new message from the given params
-func (mb *MockBackend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, clog *courier.ChannelLog) courier.Msg {
-	return &mockMsg{channel: channel, urn: urn, text: text}
+func (mb *MockBackend) NewIncomingMsg(channel courier.Channel, urn urns.URN, text string, extID string, clog *courier.ChannelLog) courier.MsgIn {
+	m := &MockMsg{
+		channel: channel, urn: urn, text: text, externalID: extID,
+	}
+
+	uuid := mb.seenExternalIDs[fmt.Sprintf("%s|%s", m.Channel().UUID(), m.ExternalID())]
+	if uuid != "" {
+		m.uuid = uuid
+		m.alreadyWritten = true
+	}
+
+	return m
 }
 
 // NewOutgoingMsg creates a new outgoing message from the given params
-func (mb *MockBackend) NewOutgoingMsg(channel courier.Channel, id courier.MsgID, urn urns.URN, text string, highPriority bool, quickReplies []string, topic string, responseToExternalID string) courier.Msg {
-	return &mockMsg{channel: channel, id: id, urn: urn, text: text, highPriority: highPriority, quickReplies: quickReplies, topic: topic, responseToExternalID: responseToExternalID}
+func (mb *MockBackend) NewOutgoingMsg(channel courier.Channel, id courier.MsgID, urn urns.URN, text string, highPriority bool, quickReplies []string,
+	topic string, responseToExternalID string, origin courier.MsgOrigin, contactLastSeenOn *time.Time) courier.MsgOut {
+
+	return &MockMsg{
+		channel:              channel,
+		id:                   id,
+		urn:                  urn,
+		text:                 text,
+		highPriority:         highPriority,
+		quickReplies:         quickReplies,
+		topic:                topic,
+		responseToExternalID: responseToExternalID,
+		origin:               origin,
+		contactLastSeenOn:    contactLastSeenOn,
+	}
 }
 
 // PushOutgoingMsg is a test method to add a message to our queue of messages to send
-func (mb *MockBackend) PushOutgoingMsg(msg courier.Msg) {
+func (mb *MockBackend) PushOutgoingMsg(msg courier.MsgOut) {
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
@@ -112,7 +141,7 @@ func (mb *MockBackend) PushOutgoingMsg(msg courier.Msg) {
 }
 
 // PopNextOutgoingMsg returns the next message that should be sent, or nil if there are none to send
-func (mb *MockBackend) PopNextOutgoingMsg(ctx context.Context) (courier.Msg, error) {
+func (mb *MockBackend) PopNextOutgoingMsg(ctx context.Context) (courier.MsgOut, error) {
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
@@ -142,7 +171,7 @@ func (mb *MockBackend) ClearMsgSent(ctx context.Context, id courier.MsgID) error
 }
 
 // MarkOutgoingMsgComplete marks the passed msg as having been dealt with
-func (mb *MockBackend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.Msg, s courier.MsgStatus) {
+func (mb *MockBackend) MarkOutgoingMsgComplete(ctx context.Context, msg courier.MsgOut, s courier.StatusUpdate) {
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
@@ -164,39 +193,48 @@ func (mb *MockBackend) SetErrorOnQueue(shouldError bool) {
 }
 
 // WriteMsg queues the passed in message internally
-func (mb *MockBackend) WriteMsg(ctx context.Context, m courier.Msg, clog *courier.ChannelLog) error {
-	mock := m.(*mockMsg)
+func (mb *MockBackend) WriteMsg(ctx context.Context, m courier.MsgIn, clog *courier.ChannelLog) error {
+	mm := m.(*MockMsg)
 
 	// this msg has already been written (we received it twice), we are a no op
-	if mock.alreadyWritten {
+	if mm.alreadyWritten {
 		return nil
 	}
 
 	mb.lastMsgID++
-	mock.id = mb.lastMsgID
+	mm.id = mb.lastMsgID
 
 	if mb.errorOnQueue {
 		return errors.New("unable to queue message")
 	}
 
 	mb.writtenMsgs = append(mb.writtenMsgs, m)
-	mb.lastContactName = m.(*mockMsg).contactName
+	mb.lastContactName = mm.contactName
+
+	if mm.urnAuthTokens != nil {
+		mb.recordURNAuthTokens(mm.urn, mm.urnAuthTokens)
+	}
+
+	if m.ExternalID() != "" {
+		mb.seenExternalIDs[fmt.Sprintf("%s|%s", m.Channel().UUID(), m.ExternalID())] = m.UUID()
+	}
+
 	return nil
 }
 
-// NewMsgStatusForID creates a new Status object for the given message id
-func (mb *MockBackend) NewMsgStatusForID(channel courier.Channel, id courier.MsgID, status courier.MsgStatusValue, clog *courier.ChannelLog) courier.MsgStatus {
-	return &mockMsgStatus{
+// NewStatusUpdate creates a new Status object for the given message id
+func (mb *MockBackend) NewStatusUpdate(channel courier.Channel, id courier.MsgID, status courier.MsgStatus, clog *courier.ChannelLog) courier.StatusUpdate {
+	return &MockStatusUpdate{
 		channel:   channel,
-		id:        id,
+		msgID:     id,
 		status:    status,
 		createdOn: time.Now().In(time.UTC),
 	}
 }
 
-// NewMsgStatusForExternalID creates a new Status object for the given external id
-func (mb *MockBackend) NewMsgStatusForExternalID(channel courier.Channel, externalID string, status courier.MsgStatusValue, clog *courier.ChannelLog) courier.MsgStatus {
-	return &mockMsgStatus{
+// NewStatusUpdateByExternalID creates a new Status object for the given external id
+func (mb *MockBackend) NewStatusUpdateByExternalID(channel courier.Channel, externalID string, status courier.MsgStatus, clog *courier.ChannelLog) courier.StatusUpdate {
+	return &MockStatusUpdate{
 		channel:    channel,
 		externalID: externalID,
 		status:     status,
@@ -204,8 +242,8 @@ func (mb *MockBackend) NewMsgStatusForExternalID(channel courier.Channel, extern
 	}
 }
 
-// WriteMsgStatus writes the status update to our queue
-func (mb *MockBackend) WriteMsgStatus(ctx context.Context, status courier.MsgStatus) error {
+// WriteStatusUpdate writes the status update to our queue
+func (mb *MockBackend) WriteStatusUpdate(ctx context.Context, status courier.StatusUpdate) error {
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
@@ -224,11 +262,18 @@ func (mb *MockBackend) NewChannelEvent(channel courier.Channel, eventType courie
 
 // WriteChannelEvent writes the channel event passed in
 func (mb *MockBackend) WriteChannelEvent(ctx context.Context, event courier.ChannelEvent, clog *courier.ChannelLog) error {
+	evt := event.(*mockChannelEvent)
+
 	mb.mutex.Lock()
 	defer mb.mutex.Unlock()
 
 	mb.writtenChannelEvents = append(mb.writtenChannelEvents, event)
-	mb.lastContactName = event.(*mockChannelEvent).contactName
+	mb.lastContactName = evt.contactName
+
+	if evt.urnAuthTokens != nil {
+		mb.recordURNAuthTokens(evt.urn, evt.urnAuthTokens)
+	}
+
 	return nil
 }
 
@@ -251,17 +296,17 @@ func (mb *MockBackend) GetChannelByAddress(ctx context.Context, cType courier.Ch
 }
 
 // GetContact creates a new contact with the passed in channel and URN
-func (mb *MockBackend) GetContact(ctx context.Context, channel courier.Channel, urn urns.URN, auth, name string, clog *courier.ChannelLog) (courier.Contact, error) {
+func (mb *MockBackend) GetContact(ctx context.Context, channel courier.Channel, urn urns.URN, authTokens map[string]string, name string, clog *courier.ChannelLog) (courier.Contact, error) {
 	contact, found := mb.contacts[urn]
 	if !found {
-		contact = &mockContact{channel, urn, auth, courier.ContactUUID(uuids.New())}
+		contact = &mockContact{channel, urn, authTokens, courier.ContactUUID(uuids.New())}
 		mb.contacts[urn] = contact
 	}
 	return contact, nil
 }
 
 // AddURNtoContact adds a URN to the passed in contact
-func (mb *MockBackend) AddURNtoContact(context context.Context, channel courier.Channel, contact courier.Contact, urn urns.URN) (urns.URN, error) {
+func (mb *MockBackend) AddURNtoContact(context context.Context, channel courier.Channel, contact courier.Contact, urn urns.URN, authTokens map[string]string) (urns.URN, error) {
 	mb.contacts[urn] = contact
 	return urn, nil
 }
@@ -284,26 +329,12 @@ func (mb *MockBackend) Stop() error { return nil }
 // Cleanup cleans up any connections that are open
 func (mb *MockBackend) Cleanup() error { return nil }
 
-// CheckExternalIDSeen checks if external ID has been seen in a period
-func (mb *MockBackend) CheckExternalIDSeen(msg courier.Msg) courier.Msg {
-	m := msg.(*mockMsg)
-
-	for _, b := range mb.seenExternalIDs {
-		if b == msg.ExternalID() {
-			m.alreadyWritten = true
-			return m
-		}
-	}
-	return m
-}
-
-// WriteExternalIDSeen marks a external ID as seen for a period
-func (mb *MockBackend) WriteExternalIDSeen(msg courier.Msg) {
-	mb.seenExternalIDs = append(mb.seenExternalIDs, msg.ExternalID())
-}
-
 // SaveAttachment saves an attachment to backend storage
 func (mb *MockBackend) SaveAttachment(ctx context.Context, ch courier.Channel, contentType string, data []byte, extension string) (string, error) {
+	if mb.storageError != nil {
+		return "", mb.storageError
+	}
+
 	mb.savedAttachments = append(mb.savedAttachments, &SavedAttachment{
 		Channel: ch, ContentType: contentType, Data: data, Extension: extension,
 	})
@@ -323,9 +354,17 @@ func (mb *MockBackend) ResolveMedia(ctx context.Context, mediaUrl string) (couri
 	return media, nil
 }
 
-// Health gives a string representing our health, empty for our mock
 func (mb *MockBackend) Health() string {
 	return ""
+}
+
+// Health gives a string representing our health, empty for our mock
+func (mb *MockBackend) HttpClient(bool) *http.Client {
+	return http.DefaultClient
+}
+
+func (mb *MockBackend) HttpAccess() *httpx.AccessConfig {
+	return nil
 }
 
 // Status returns a string describing the status of the service, queue size etc..
@@ -347,11 +386,12 @@ func (mb *MockBackend) RedisPool() *redis.Pool {
 // Methods not part of the backed interface but used in tests
 ////////////////////////////////////////////////////////////////////////////////
 
-func (mb *MockBackend) WrittenMsgs() []courier.Msg                   { return mb.writtenMsgs }
-func (mb *MockBackend) WrittenMsgStatuses() []courier.MsgStatus      { return mb.writtenMsgStatuses }
-func (mb *MockBackend) WrittenChannelEvents() []courier.ChannelEvent { return mb.writtenChannelEvents }
-func (mb *MockBackend) WrittenChannelLogs() []*courier.ChannelLog    { return mb.writtenChannelLogs }
-func (mb *MockBackend) SavedAttachments() []*SavedAttachment         { return mb.savedAttachments }
+func (mb *MockBackend) WrittenMsgs() []courier.MsgIn                  { return mb.writtenMsgs }
+func (mb *MockBackend) WrittenMsgStatuses() []courier.StatusUpdate    { return mb.writtenMsgStatuses }
+func (mb *MockBackend) WrittenChannelEvents() []courier.ChannelEvent  { return mb.writtenChannelEvents }
+func (mb *MockBackend) WrittenChannelLogs() []*courier.ChannelLog     { return mb.writtenChannelLogs }
+func (mb *MockBackend) SavedAttachments() []*SavedAttachment          { return mb.savedAttachments }
+func (mb *MockBackend) URNAuthTokens() map[urns.URN]map[string]string { return mb.urnAuthTokens }
 
 // LastContactName returns the contact name set on the last msg or channel event written
 func (mb *MockBackend) LastContactName() string {
@@ -378,10 +418,26 @@ func (mb *MockBackend) ClearChannels() {
 // Reset clears our queued messages, seen external IDs, and channel logs
 func (mb *MockBackend) Reset() {
 	mb.lastMsgID = courier.NilMsgID
-	mb.seenExternalIDs = nil
+	mb.seenExternalIDs = make(map[string]courier.MsgUUID)
 
 	mb.writtenMsgs = nil
 	mb.writtenMsgStatuses = nil
 	mb.writtenChannelEvents = nil
 	mb.writtenChannelLogs = nil
+	mb.urnAuthTokens = nil
+}
+
+// SetStorageError sets the error to return for operation that try to use storage
+func (mb *MockBackend) SetStorageError(err error) {
+	mb.storageError = err
+}
+
+func (mb *MockBackend) recordURNAuthTokens(urn urns.URN, authTokens map[string]string) {
+	if mb.urnAuthTokens == nil {
+		mb.urnAuthTokens = make(map[urns.URN]map[string]string)
+	}
+	if mb.urnAuthTokens[urn] == nil {
+		mb.urnAuthTokens[urn] = map[string]string{}
+	}
+	utils.MapUpdate(mb.urnAuthTokens[urn], authTokens)
 }

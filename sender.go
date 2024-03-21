@@ -3,11 +3,123 @@ package courier
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/nyaruka/gocommon/analytics"
-	"github.com/sirupsen/logrus"
+	"github.com/nyaruka/gocommon/urns"
+	"github.com/pkg/errors"
 )
+
+type SendResult struct {
+	externalIDs []string
+	newURN      urns.URN
+}
+
+func (r *SendResult) AddExternalID(id string) {
+	r.externalIDs = append(r.externalIDs, id)
+}
+
+func (r *SendResult) ExternalIDs() []string {
+	return r.externalIDs
+}
+
+func (r *SendResult) SetNewURN(u urns.URN) {
+	r.newURN = u
+}
+
+func (r *SendResult) GetNewURN() urns.URN {
+	return r.newURN
+
+}
+
+type SendError struct {
+	msg       string
+	retryable bool
+	loggable  bool
+
+	clogCode    string
+	clogMsg     string
+	clogExtCode string
+}
+
+func (e *SendError) Error() string {
+	return e.msg
+}
+
+// ErrChannelConfig should be returned by a handler send method when channel config is invalid
+var ErrChannelConfig error = &SendError{
+	msg:       "channel config invalid",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "channel_config",
+	clogMsg:   "Channel configuration is missing required values.",
+}
+
+// ErrConnectionFailed should be returned when connection to the channel fails (timeout or 5XX response)
+var ErrConnectionFailed error = &SendError{
+	msg:       "channel connection failed",
+	retryable: true,
+	loggable:  false,
+	clogCode:  "connection_failed",
+	clogMsg:   "Connection to server failed.",
+}
+
+// ErrConnectionThrottled should be returned when channel tells us we're rate limited
+var ErrConnectionThrottled error = &SendError{
+	msg:       "channel rate limited",
+	retryable: true,
+	loggable:  false,
+	clogCode:  "connection_throttled",
+	clogMsg:   "Connection to server has been rate limited.",
+}
+
+// ErrResponseStatus should be returned when channel the response has a non-success status code
+var ErrResponseStatus error = &SendError{
+	msg:       "response status code",
+	retryable: false,
+	loggable:  false,
+	clogCode:  "response_status",
+	clogMsg:   "Response has non-success status code.",
+}
+
+// ErrResponseUnparseable should be returned when channel response can't be parsed in expected format
+var ErrResponseUnparseable error = &SendError{
+	msg:       "response couldn't be parsed",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "response_unparseable",
+	clogMsg:   "Response could not be parsed in the expected format.",
+}
+
+// ErrResponseUnexpected should be returned when channel response doesn't match what we expect
+var ErrResponseUnexpected error = &SendError{
+	msg:       "response not expected values",
+	retryable: false,
+	loggable:  true,
+	clogCode:  "response_unexpected",
+	clogMsg:   "Response doesn't match expected values.",
+}
+
+// ErrContactStopped should be returned when channel tells us explicitly that the contact has opted-out
+var ErrContactStopped error = &SendError{
+	msg:       "contact opted out",
+	retryable: false,
+	loggable:  false,
+	clogCode:  "contact_stopped",
+	clogMsg:   "Contact has opted-out of messages from this channel.",
+}
+
+func ErrFailedWithReason(code, desc string) *SendError {
+	return &SendError{
+		msg:         "channel rejected send with reason",
+		retryable:   false,
+		loggable:    false,
+		clogCode:    "rejected_with_reason",
+		clogMsg:     desc,
+		clogExtCode: code,
+	}
+}
 
 // Foreman takes care of managing our set of sending workers and assigns msgs for each to send
 type Foreman struct {
@@ -47,7 +159,7 @@ func (f *Foreman) Stop() {
 		sender.Stop()
 	}
 	close(f.quit)
-	logrus.WithField("comp", "foreman").WithField("state", "stopping").Info("foreman stopping")
+	slog.Info("foreman stopping", "comp", "foreman", "state", "stopping")
 }
 
 // Assign is our main loop for the Foreman, it takes care of popping the next outgoing messages from our
@@ -55,12 +167,11 @@ func (f *Foreman) Stop() {
 func (f *Foreman) Assign() {
 	f.server.WaitGroup().Add(1)
 	defer f.server.WaitGroup().Done()
-	log := logrus.WithField("comp", "foreman")
+	log := slog.With("comp", "foreman")
 
-	log.WithFields(logrus.Fields{
-		"state":   "started",
-		"senders": len(f.senders),
-	}).Info("senders started and waiting")
+	log.Info("senders started and waiting",
+		"state", "started",
+		"senders", len(f.senders))
 
 	backend := f.server.Backend()
 	lastSleep := false
@@ -69,7 +180,7 @@ func (f *Foreman) Assign() {
 		select {
 		// return if we have been told to stop
 		case <-f.quit:
-			log.WithField("state", "stopped").Info("foreman stopped")
+			log.Info("foreman stopped", "state", "stopped")
 			return
 
 		// otherwise, grab the next msg and assign it to a sender
@@ -86,7 +197,7 @@ func (f *Foreman) Assign() {
 			} else {
 				// we received an error getting the next message, log it
 				if err != nil {
-					log.WithError(err).Error("error popping outgoing msg")
+					log.Error("error popping outgoing msg", "error", err)
 				}
 
 				// add our sender back to our queue and sleep a bit
@@ -105,7 +216,7 @@ func (f *Foreman) Assign() {
 type Sender struct {
 	id      int
 	foreman *Foreman
-	job     chan Msg
+	job     chan MsgOut
 }
 
 // NewSender creates a new sender responsible for sending messages
@@ -113,7 +224,7 @@ func NewSender(foreman *Foreman, id int) *Sender {
 	sender := &Sender{
 		id:      id,
 		foreman: foreman,
-		job:     make(chan Msg, 1),
+		job:     make(chan MsgOut, 1),
 	}
 	return sender
 }
@@ -124,10 +235,7 @@ func (w *Sender) Start() {
 
 	go func() {
 		defer w.foreman.server.WaitGroup().Done()
-
-		log := logrus.WithField("comp", "sender").WithField("sender_id", w.id)
-		log.Debug("started")
-
+		slog.Debug("started", "comp", "sender", "sender_id", w.id)
 		for {
 			// list ourselves as available for work
 			w.foreman.availableSenders <- w
@@ -137,7 +245,7 @@ func (w *Sender) Start() {
 
 			// exit if we were stopped
 			if msg == nil {
-				log.Debug("stopped")
+				slog.Debug("stopped")
 				return
 			}
 
@@ -151,8 +259,9 @@ func (w *Sender) Stop() {
 	close(w.job)
 }
 
-func (w *Sender) sendMessage(msg Msg) {
-	log := logrus.WithField("comp", "sender").WithField("sender_id", w.id).WithField("channel_uuid", msg.Channel().UUID())
+func (w *Sender) sendMessage(msg MsgOut) {
+
+	log := slog.With("comp", "sender", "sender_id", w.id, "channel_uuid", msg.Channel().UUID())
 
 	server := w.foreman.server
 	backend := server.Backend()
@@ -161,12 +270,12 @@ func (w *Sender) sendMessage(msg Msg) {
 	sendCTX, cancel := context.WithTimeout(context.Background(), time.Second*35)
 	defer cancel()
 
-	log = log.WithField("msg_id", msg.ID()).WithField("msg_text", msg.Text()).WithField("msg_urn", msg.URN().Identity())
+	log = log.With("msg_id", msg.ID(), "msg_text", msg.Text(), "msg_urn", msg.URN().Identity())
 	if len(msg.Attachments()) > 0 {
-		log = log.WithField("attachments", msg.Attachments())
+		log = log.With("attachments", msg.Attachments())
 	}
 	if len(msg.QuickReplies()) > 0 {
-		log = log.WithField("quick_replies", msg.QuickReplies())
+		log = log.With("quick_replies", msg.QuickReplies())
 	}
 
 	start := time.Now()
@@ -175,7 +284,7 @@ func (w *Sender) sendMessage(msg Msg) {
 	if msg.IsResend() {
 		err := backend.ClearMsgSent(sendCTX, msg.ID())
 		if err != nil {
-			log.WithError(err).Error("error clearing sent status for msg")
+			log.Error("error clearing sent status for msg", "error", err)
 		}
 	}
 
@@ -184,10 +293,10 @@ func (w *Sender) sendMessage(msg Msg) {
 
 	// failing on a lookup isn't a halting problem but we should log it
 	if err != nil {
-		log.WithError(err).Error("error looking up msg was sent")
+		log.Error("error looking up msg was sent", "error", err)
 	}
 
-	var status MsgStatus
+	var status StatusUpdate
 	var redactValues []string
 	handler := server.GetHandler(msg.Channel())
 	if handler != nil {
@@ -198,40 +307,26 @@ func (w *Sender) sendMessage(msg Msg) {
 
 	if handler == nil {
 		// if there's no handler, create a FAILED status for it
-		status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgFailed, clog)
-		log.Errorf("unable to find handler for channel type: %s", msg.Channel().ChannelType())
+		status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusFailed, clog)
+		log.Error(fmt.Sprintf("unable to find handler for channel type: %s", msg.Channel().ChannelType()))
 
 	} else if sent {
 		// if this message was already sent, create a WIRED status for it
-		status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgWired, clog)
-		log.Warning("duplicate send, marking as wired")
+		status = backend.NewStatusUpdate(msg.Channel(), msg.ID(), MsgStatusWired, clog)
+		log.Warn("duplicate send, marking as wired")
 
 	} else {
-		// send our message
-		status, err = handler.Send(sendCTX, msg, clog)
+
+		status = w.sendByHandler(sendCTX, handler, msg, clog, log)
+
 		duration := time.Since(start)
 		secondDuration := float64(duration) / float64(time.Second)
+		log.Debug("send complete", "status", status.Status(), "elapsed", duration)
 
-		if err != nil {
-			log.WithError(err).WithField("elapsed", duration).Error("error sending message")
-
-			// handlers should log errors implicitly with user friendly messages.. but if not.. add what we have
-			if len(clog.Errors()) == 0 {
-				clog.RawError(err)
-			}
-
-			// possible for handlers to only return an error in which case we construct an error status
-			if status == nil {
-				status = backend.NewMsgStatusForID(msg.Channel(), msg.ID(), MsgErrored, clog)
-			}
-		}
-
-		// report to librato and log locally
-		if status.Status() == MsgErrored || status.Status() == MsgFailed {
-			log.WithField("elapsed", duration).Warning("msg errored")
+		// report to librato
+		if status.Status() == MsgStatusErrored || status.Status() == MsgStatusFailed {
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_error_%s", msg.Channel().ChannelType()), secondDuration)
 		} else {
-			log.WithField("elapsed", duration).Info("msg sent")
 			analytics.Gauge(fmt.Sprintf("courier.msg_send_%s", msg.Channel().ChannelType()), secondDuration)
 		}
 	}
@@ -240,9 +335,9 @@ func (w *Sender) sendMessage(msg Msg) {
 	writeCTX, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	err = backend.WriteMsgStatus(writeCTX, status)
+	err = backend.WriteStatusUpdate(writeCTX, status)
 	if err != nil {
-		log.WithError(err).Info("error writing msg status")
+		log.Info("error writing msg status", "error", err)
 	}
 
 	clog.End()
@@ -250,9 +345,60 @@ func (w *Sender) sendMessage(msg Msg) {
 	// write our logs as well
 	err = backend.WriteChannelLog(writeCTX, clog)
 	if err != nil {
-		log.WithError(err).Info("error writing msg logs")
+		log.Info("error writing msg logs", "error", err)
 	}
 
 	// mark our send task as complete
 	backend.MarkOutgoingMsgComplete(writeCTX, msg, status)
+}
+
+func (w *Sender) sendByHandler(ctx context.Context, h ChannelHandler, m MsgOut, clog *ChannelLog, log *slog.Logger) StatusUpdate {
+	backend := w.foreman.server.Backend()
+	res := &SendResult{newURN: urns.NilURN}
+	err := h.Send(ctx, m, res, clog)
+
+	status := backend.NewStatusUpdate(m.Channel(), m.ID(), MsgStatusWired, clog)
+
+	// fow now we can only store one external id per message
+	if len(res.ExternalIDs()) > 0 {
+		status.SetExternalID(res.ExternalIDs()[0])
+	}
+
+	if res.newURN != urns.NilURN {
+		urnErr := status.SetURNUpdate(m.URN(), res.newURN)
+		if urnErr != nil {
+			clog.RawError(urnErr)
+		}
+	}
+
+	var serr *SendError
+	if errors.As(err, &serr) {
+		if serr.loggable {
+			log.Error("error sending message", "error", err)
+		}
+		if serr.retryable {
+			status.SetStatus(MsgStatusErrored)
+		} else {
+			status.SetStatus(MsgStatusFailed)
+		}
+
+		clog.Error(NewChannelError(serr.clogCode, serr.clogExtCode, serr.clogMsg))
+
+		// if handler returned ErrContactStopped need to write a stop event
+		if serr == ErrContactStopped {
+			channelEvent := backend.NewChannelEvent(m.Channel(), EventTypeStopContact, m.URN(), clog)
+			if err = backend.WriteChannelEvent(ctx, channelEvent, clog); err != nil {
+				log.Error("error writing stop event", "error", err)
+			}
+		}
+
+	} else if err != nil {
+		log.Error("error sending message", "error", err)
+
+		status.SetStatus(MsgStatusErrored)
+
+		clog.Error(NewChannelError("internal_error", "", "An internal error occured."))
+	}
+
+	return status
 }

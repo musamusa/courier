@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/nyaruka/gocommon/uuids"
-	"github.com/nyaruka/null/v2"
+	"github.com/nyaruka/null/v3"
 )
 
 const (
@@ -55,15 +55,11 @@ const (
 	ConfigSendHeaders = "headers"
 )
 
-// ChannelType is our typing of the two char channel types
+// ChannelType is the 1-3 letter code used for channel types in the database
 type ChannelType string
 
 // AnyChannelType is our empty channel type used when doing lookups without channel type assertions
-var AnyChannelType = ChannelType("")
-
-func (ct ChannelType) String() string {
-	return string(ct)
-}
+const AnyChannelType = ChannelType("")
 
 // ChannelRole is a role that a channel can perform
 type ChannelRole string
@@ -139,9 +135,9 @@ type Channel interface {
 	// CallbackDomain returns the domain that should be used for any callbacks the channel registers
 	CallbackDomain(fallbackDomain string) string
 
-	ConfigForKey(key string, defaultValue interface{}) interface{}
+	ConfigForKey(key string, defaultValue any) any
 	StringConfigForKey(key string, defaultValue string) string
 	BoolConfigForKey(key string, defaultValue bool) bool
 	IntConfigForKey(key string, defaultValue int) int
-	OrgConfigForKey(key string, defaultValue interface{}) interface{}
+	OrgConfigForKey(key string, defaultValue any) any
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // WriteMsgsAndResponse writes the passed in message to our backend
-func WriteMsgsAndResponse(ctx context.Context, h courier.ChannelHandler, msgs []courier.Msg, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
+func WriteMsgsAndResponse(ctx context.Context, h courier.ChannelHandler, msgs []courier.MsgIn, w http.ResponseWriter, r *http.Request, clog *courier.ChannelLog) ([]courier.Event, error) {
 	events := make([]courier.Event, len(msgs))
 	for i, m := range msgs {
 		err := h.Server().Backend().WriteMsg(ctx, m, clog)
@@ -22,17 +22,13 @@ func WriteMsgsAndResponse(ctx context.Context, h courier.ChannelHandler, msgs []
 }
 
 // WriteMsgStatusAndResponse write the passed in status to our backend
-func WriteMsgStatusAndResponse(ctx context.Context, h courier.ChannelHandler, channel courier.Channel, status courier.MsgStatus, w http.ResponseWriter, r *http.Request) ([]courier.Event, error) {
-	err := h.Server().Backend().WriteMsgStatus(ctx, status)
-	if err == courier.ErrMsgNotFound {
-		return nil, WriteAndLogRequestIgnored(ctx, h, channel, w, r, "msg not found, ignored")
-	}
-
+func WriteMsgStatusAndResponse(ctx context.Context, h courier.ChannelHandler, channel courier.Channel, status courier.StatusUpdate, w http.ResponseWriter, r *http.Request) ([]courier.Event, error) {
+	err := h.Server().Backend().WriteStatusUpdate(ctx, status)
 	if err != nil {
 		return nil, err
 	}
 
-	return []courier.Event{status}, h.WriteStatusSuccessResponse(ctx, w, []courier.MsgStatus{status})
+	return []courier.Event{status}, h.WriteStatusSuccessResponse(ctx, w, []courier.StatusUpdate{status})
 }
 
 // WriteAndLogRequestError logs the passed in error and writes the response to the response writer
